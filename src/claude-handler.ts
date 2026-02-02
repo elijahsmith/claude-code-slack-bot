@@ -1,7 +1,78 @@
-import { query, type SDKMessage } from '@anthropic-ai/claude-code';
+import { query, type SDKMessage, type HookCallback, type PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
+import path from 'path';
 import { ConversationSession } from './types';
 import { Logger } from './logger';
 import { McpManager, McpServerConfig } from './mcp-manager';
+import { config } from './config';
+
+// Permission handler type - returns allow/deny decision
+export type PermissionHandler = (
+  toolName: string,
+  input: Record<string, unknown>
+) => Promise<{ behavior: 'allow'; updatedInput: Record<string, unknown> } | { behavior: 'deny'; message: string }>;
+
+// Hook to auto-approve file operations within the working directory
+const createCwdAutoApproveHook = (logger: Logger): HookCallback => async (input, toolUseID, { signal }) => {
+  if (input.hook_event_name !== 'PreToolUse') return {};
+
+  const preInput = input as PreToolUseHookInput;
+  const toolName = preInput.tool_name;
+  const cwd = preInput.cwd;
+
+  // Only handle file-related tools
+  const fileTools = ['Read', 'Edit', 'Write', 'Glob', 'Grep'];
+  if (!fileTools.includes(toolName)) return {};
+
+  // Get the file path from tool input
+  const toolInput = preInput.tool_input as Record<string, unknown>;
+  const filePath = (toolInput?.file_path as string) || (toolInput?.path as string);  // Glob uses 'path'
+
+  if (!filePath) {
+    // No file path specified (e.g., Grep without path uses cwd) - allow
+    return {
+      hookSpecificOutput: {
+        hookEventName: input.hook_event_name,
+        permissionDecision: 'allow',
+        permissionDecisionReason: 'Auto-approved: no specific path, defaults to cwd'
+      }
+    };
+  }
+
+  // Resolve to absolute path and check if within cwd
+  const absolutePath = path.resolve(cwd, filePath);
+  const normalizedCwd = path.resolve(cwd);
+
+  if (absolutePath.startsWith(normalizedCwd + path.sep) || absolutePath === normalizedCwd) {
+    logger.debug('Auto-approving file operation within cwd', {
+      tool: toolName,
+      filePath,
+      absolutePath,
+      cwd: normalizedCwd
+    });
+    return {
+      hookSpecificOutput: {
+        hookEventName: input.hook_event_name,
+        permissionDecision: 'allow',
+        permissionDecisionReason: 'Auto-approved: path is within working directory'
+      }
+    };
+  }
+
+  // Outside cwd - strictly deny
+  logger.warn('Blocked file operation outside cwd', {
+    tool: toolName,
+    filePath,
+    absolutePath,
+    cwd: normalizedCwd
+  });
+  return {
+    hookSpecificOutput: {
+      hookEventName: input.hook_event_name,
+      permissionDecision: 'deny',
+      permissionDecisionReason: `Access denied: path "${filePath}" is outside the working directory`
+    }
+  };
+};
 
 export class ClaudeHandler {
   private sessions: Map<string, ConversationSession> = new Map();
@@ -37,54 +108,58 @@ export class ClaudeHandler {
     session?: ConversationSession,
     abortController?: AbortController,
     workingDirectory?: string,
-    slackContext?: { channel: string; threadTs?: string; user: string }
+    permissionHandler?: PermissionHandler
   ): AsyncGenerator<SDKMessage, void, unknown> {
     const options: any = {
       outputFormat: 'stream-json',
-      permissionMode: slackContext ? 'default' : 'bypassPermissions',
+      permissionMode: permissionHandler ? 'default' : 'bypassPermissions',
+      // Use Claude Code's system prompt preset to maintain the same behavior
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: config.systemPrompt },
+      settingSources: ["project"]
     };
 
-    // Add permission prompt tool if we have Slack context
-    if (slackContext) {
-      options.permissionPromptToolName = 'mcp__permission-prompt__permission_prompt';
-      this.logger.debug('Added permission prompt tool for Slack integration', slackContext);
+    // Add custom system prompt if configured
+    if (config.systemPrompt) {
+      this.logger.info('Using custom system prompt', {
+        length: config.systemPrompt.length,
+        preview: config.systemPrompt.substring(0, 100) + '...'
+      });
+    } else {
+      this.logger.debug('No custom system prompt configured');
+    }
+
+    // Add canUseTool callback for permission handling via Slack
+    if (permissionHandler) {
+      options.canUseTool = async (toolName: string, input: Record<string, unknown>) => {
+        this.logger.debug('Permission requested for tool', { toolName, input });
+        return await permissionHandler(toolName, input);
+      };
+      this.logger.debug('Added canUseTool callback for Slack permission handling');
     }
 
     if (workingDirectory) {
       options.cwd = workingDirectory;
+
+      // Add hook to auto-approve file operations within the working directory
+      // and deny operations outside the working directory
+      options.hooks = {
+        PreToolUse: [
+          { matcher: 'Read|Edit|Write|Glob|Grep', hooks: [createCwdAutoApproveHook(this.logger)] }
+        ]
+      };
+      this.logger.debug('Added cwd auto-approve hook for file operations', { cwd: workingDirectory });
     }
 
     // Add MCP server configuration if available
     const mcpServers = this.mcpManager.getServerConfiguration();
-    
-    // Add permission prompt server if we have Slack context
-    if (slackContext) {
-      const permissionServer = {
-        'permission-prompt': {
-          command: 'npx',
-          args: ['tsx', '/Users/marcelpociot/Experiments/claude-code-slack/src/permission-mcp-server.ts'],
-          env: {
-            SLACK_BOT_TOKEN: process.env.SLACK_BOT_TOKEN,
-            SLACK_CONTEXT: JSON.stringify(slackContext)
-          }
-        }
-      };
-      
-      if (mcpServers) {
-        options.mcpServers = { ...mcpServers, ...permissionServer };
-      } else {
-        options.mcpServers = permissionServer;
-      }
-    } else if (mcpServers && Object.keys(mcpServers).length > 0) {
+
+    if (mcpServers && Object.keys(mcpServers).length > 0) {
       options.mcpServers = mcpServers;
     }
-    
+
     if (options.mcpServers && Object.keys(options.mcpServers).length > 0) {
-      // Allow all MCP tools by default, plus permission prompt tool
+      // Allow all MCP tools by default
       const defaultMcpTools = this.mcpManager.getDefaultAllowedTools();
-      if (slackContext) {
-        defaultMcpTools.push('mcp__permission-prompt');
-      }
       if (defaultMcpTools.length > 0) {
         options.allowedTools = defaultMcpTools;
       }
@@ -93,7 +168,7 @@ export class ClaudeHandler {
         serverCount: Object.keys(options.mcpServers).length,
         servers: Object.keys(options.mcpServers),
         allowedTools: defaultMcpTools,
-        hasSlackContext: !!slackContext,
+        hasPermissionHandler: !!permissionHandler,
       });
     }
 
@@ -106,16 +181,20 @@ export class ClaudeHandler {
 
     this.logger.debug('Claude query options', options);
 
+    // Add abort controller to options
+    if (abortController) {
+      options.abortController = abortController;
+    }
+
     try {
       for await (const message of query({
         prompt,
-        abortController: abortController || new AbortController(),
         options,
       })) {
         if (message.type === 'system' && message.subtype === 'init') {
           if (session) {
             session.sessionId = message.session_id;
-            this.logger.info('Session initialized', { 
+            this.logger.info('Session initialized', {
               sessionId: message.session_id,
               model: (message as any).model,
               tools: (message as any).tools?.length || 0,

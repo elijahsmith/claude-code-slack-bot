@@ -1,13 +1,18 @@
-import { App } from '@slack/bolt';
-import { ClaudeHandler } from './claude-handler';
-import { SDKMessage } from '@anthropic-ai/claude-code';
+import pkg from '@slack/bolt';
+const { App } = pkg;
+import { ClaudeHandler, PermissionHandler } from './claude-handler';
+import { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { Logger } from './logger';
 import { WorkingDirectoryManager } from './working-directory-manager';
 import { FileHandler, ProcessedFile } from './file-handler';
 import { TodoManager, Todo } from './todo-manager';
 import { McpManager } from './mcp-manager';
-import { permissionServer } from './permission-mcp-server';
 import { config } from './config';
+
+// Permission approval response type
+type PermissionResponse =
+  | { behavior: 'allow'; updatedInput: Record<string, unknown> }
+  | { behavior: 'deny'; message: string };
 
 interface MessageEvent {
   user: string;
@@ -27,7 +32,7 @@ interface MessageEvent {
 }
 
 export class SlackHandler {
-  private app: App;
+  private app: InstanceType<typeof App>;
   private claudeHandler: ClaudeHandler;
   private activeControllers: Map<string, AbortController> = new Map();
   private logger = new Logger('SlackHandler');
@@ -39,8 +44,15 @@ export class SlackHandler {
   private originalMessages: Map<string, { channel: string; ts: string }> = new Map(); // sessionKey -> original message info
   private currentReactions: Map<string, string> = new Map(); // sessionKey -> current emoji
   private botUserId: string | null = null;
+  private userNameCache: Map<string, string> = new Map(); // userId -> displayName
+  // Pending permission approvals - approvalId -> { resolve, messageTs, channel }
+  private pendingApprovals: Map<string, {
+    resolve: (response: PermissionResponse) => void;
+    messageTs: string;
+    channel: string;
+  }> = new Map();
 
-  constructor(app: App, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
+  constructor(app: InstanceType<typeof App>, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
     this.app = app;
     this.claudeHandler = claudeHandler;
     this.mcpManager = mcpManager;
@@ -215,10 +227,16 @@ export class SlackHandler {
     let statusMessageTs: string | undefined;
 
     try {
-      // Prepare the prompt with file attachments
-      const finalPrompt = processedFiles.length > 0 
+      // Get user display name for context
+      const userName = await this.getUserDisplayName(user);
+
+      // Prepare the prompt with file attachments and user context
+      const messageContent = processedFiles.length > 0
         ? await this.fileHandler.formatFilePrompt(processedFiles, text || '')
         : text || '';
+
+      // Include user name so Claude knows who is speaking
+      const finalPrompt = `[${userName}]: ${messageContent}`;
 
       this.logger.info('Sending query to Claude Code SDK', { 
         prompt: finalPrompt.substring(0, 200) + (finalPrompt.length > 200 ? '...' : ''), 
@@ -236,15 +254,11 @@ export class SlackHandler {
 
       // Add thinking reaction to original message (but don't spam if already set)
       await this.updateMessageReaction(sessionKey, '🤔');
-      
-      // Create Slack context for permission prompts
-      const slackContext = {
-        channel,
-        threadTs: thread_ts,
-        user
-      };
-      
-      for await (const message of this.claudeHandler.streamQuery(finalPrompt, session, abortController, workingDirectory, slackContext)) {
+
+      // Create permission handler for Slack-based approval
+      const permissionHandler = this.createPermissionHandler(channel, thread_ts || ts, user);
+
+      for await (const message of this.claudeHandler.streamQuery(finalPrompt, session, abortController, workingDirectory, permissionHandler)) {
         if (abortController.signal.aborted) break;
 
         this.logger.debug('Received message from Claude SDK', {
@@ -358,14 +372,14 @@ export class SlackHandler {
 
         // Update reaction to show error
         await this.updateMessageReaction(sessionKey, '❌');
-        
+
         await say({
           text: `Error: ${error.message || 'Something went wrong'}`,
           thread_ts: thread_ts || ts,
         });
       } else {
         this.logger.debug('Request was aborted', { sessionKey });
-        
+
         // Update status to cancelled
         if (statusMessageTs) {
           await this.app.client.chat.update({
@@ -568,16 +582,131 @@ export class SlackHandler {
     }
   }
 
+  // Create a permission handler for Slack-based tool approval
+  private createPermissionHandler(channel: string, threadTs: string, user: string): PermissionHandler {
+    return async (toolName: string, input: Record<string, unknown>): Promise<PermissionResponse> => {
+      // Generate unique approval ID that includes the input data
+      const approvalId = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}::${JSON.stringify(input)}`;
+
+      // Create approval message with buttons
+      const blocks = [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `🔐 *Permission Request*\n\nClaude wants to use the tool: \`${toolName}\`\n\n*Parameters:*\n\`\`\`json\n${JSON.stringify(input, null, 2).substring(0, 2000)}\n\`\`\``
+          }
+        },
+        {
+          type: "actions",
+          elements: [
+            {
+              type: "button",
+              text: {
+                type: "plain_text",
+                text: "✅ Approve"
+              },
+              style: "primary",
+              action_id: "approve_tool",
+              value: approvalId
+            },
+            {
+              type: "button",
+              text: {
+                type: "plain_text",
+                text: "❌ Deny"
+              },
+              style: "danger",
+              action_id: "deny_tool",
+              value: approvalId
+            }
+          ]
+        },
+        {
+          type: "context",
+          elements: [
+            {
+              type: "mrkdwn",
+              text: `Requested by: <@${user}> | Tool: ${toolName}`
+            }
+          ]
+        }
+      ];
+
+      try {
+        // Send approval request to Slack
+        const result = await this.app.client.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          blocks,
+          text: `Permission request for ${toolName}` // Fallback text
+        });
+
+        if (!result.ts) {
+          this.logger.error('Failed to post permission message - no ts returned');
+          return { behavior: 'deny', message: 'Failed to request permission' };
+        }
+
+        // Create promise that will be resolved when button is clicked
+        return new Promise<PermissionResponse>((resolve) => {
+          this.pendingApprovals.set(approvalId, {
+            resolve,
+            messageTs: result.ts!,
+            channel
+          });
+
+          // Set timeout (60 seconds - SDK limit)
+          setTimeout(() => {
+            if (this.pendingApprovals.has(approvalId)) {
+              this.pendingApprovals.delete(approvalId);
+              this.logger.info('Permission request timed out', { approvalId, toolName });
+
+              // Update the message to show timeout
+              this.app.client.chat.update({
+                channel,
+                ts: result.ts!,
+                text: '⏱️ Permission request timed out',
+                blocks: []
+              }).catch(() => {});
+
+              resolve({ behavior: 'deny', message: 'Permission request timed out' });
+            }
+          }, 55000); // 55 seconds to leave buffer before SDK's 60s timeout
+        });
+      } catch (error) {
+        this.logger.error('Error posting permission request', error);
+        return { behavior: 'deny', message: 'Error requesting permission' };
+      }
+    };
+  }
+
+  // Map Unicode emoji to Slack emoji names
+  private emojiToSlackName(emoji: string): string {
+    const emojiMap: Record<string, string> = {
+      '🤔': 'thinking_face',
+      '⚙️': 'gear',
+      '✅': 'white_check_mark',
+      '❌': 'x',
+      '⏹️': 'stop_button',
+      '📋': 'clipboard',
+      '🔄': 'arrows_counterclockwise',
+    };
+    return emojiMap[emoji] || emoji;
+  }
+
   private async updateMessageReaction(sessionKey: string, emoji: string): Promise<void> {
     const originalMessage = this.originalMessages.get(sessionKey);
     if (!originalMessage) {
       return;
     }
 
+    // Convert Unicode emoji to Slack name
+    const slackEmoji = this.emojiToSlackName(emoji);
+
     // Check if we're already showing this emoji
     const currentEmoji = this.currentReactions.get(sessionKey);
-    if (currentEmoji === emoji) {
-      this.logger.debug('Reaction already set, skipping', { sessionKey, emoji });
+    if (currentEmoji === slackEmoji) {
+      this.logger.debug('Reaction already set, skipping', { sessionKey, emoji: slackEmoji });
       return;
     }
 
@@ -601,21 +730,29 @@ export class SlackHandler {
       }
 
       // Add the new reaction
-      await this.app.client.reactions.add({
-        channel: originalMessage.channel,
-        timestamp: originalMessage.ts,
-        name: emoji,
-      });
+      try {
+        await this.app.client.reactions.add({
+          channel: originalMessage.channel,
+          timestamp: originalMessage.ts,
+          name: slackEmoji,
+        });
+      } catch (addError: any) {
+        // already_reacted is fine - the reaction is there which is what we want
+        if (addError?.data?.error !== 'already_reacted') {
+          throw addError;
+        }
+        this.logger.debug('Reaction already exists, continuing', { sessionKey, emoji: slackEmoji });
+      }
 
-      // Track the current reaction
-      this.currentReactions.set(sessionKey, emoji);
+      // Track the current reaction (store Slack name for removal later)
+      this.currentReactions.set(sessionKey, slackEmoji);
 
-      this.logger.debug('Updated message reaction', { 
-        sessionKey, 
-        emoji, 
+      this.logger.debug('Updated message reaction', {
+        sessionKey,
+        emoji: slackEmoji,
         previousEmoji: currentEmoji,
-        channel: originalMessage.channel, 
-        ts: originalMessage.ts 
+        channel: originalMessage.channel,
+        ts: originalMessage.ts
       });
     } catch (error) {
       this.logger.warn('Failed to update message reaction', error);
@@ -662,6 +799,24 @@ export class SlackHandler {
       }
     }
     return this.botUserId;
+  }
+
+  private async getUserDisplayName(userId: string): Promise<string> {
+    // Check cache first
+    const cached = this.userNameCache.get(userId);
+    if (cached) return cached;
+
+    try {
+      const response = await this.app.client.users.info({ user: userId });
+      const user = response.user as any;
+      // Prefer display_name, fall back to real_name, then name
+      const displayName = user?.profile?.display_name || user?.profile?.real_name || user?.name || userId;
+      this.userNameCache.set(userId, displayName);
+      return displayName;
+    } catch (error) {
+      this.logger.error('Failed to get user info', { userId, error });
+      return userId; // Fall back to user ID
+    }
   }
 
   private async handleChannelJoin(channelId: string, say: any): Promise<void> {
@@ -714,7 +869,7 @@ export class SlackHandler {
 
   setupEventHandlers() {
     // Handle direct messages
-    this.app.message(async ({ message, say }) => {
+    this.app.message(async ({ message, say }: { message: any; say: any }) => {
       if (message.subtype === undefined && 'user' in message) {
         this.logger.info('Handling direct message event');
         await this.handleMessage(message as MessageEvent, say);
@@ -722,7 +877,7 @@ export class SlackHandler {
     });
 
     // Handle app mentions
-    this.app.event('app_mention', async ({ event, say }) => {
+    this.app.event('app_mention', async ({ event, say }: { event: any; say: any }) => {
       this.logger.info('Handling app mention event');
       const text = event.text.replace(/<@[^>]+>/g, '').trim();
       await this.handleMessage({
@@ -732,7 +887,7 @@ export class SlackHandler {
     });
 
     // Handle file uploads in threads
-    this.app.event('message', async ({ event, say }) => {
+    this.app.event('message', async ({ event, say }: { event: any; say: any }) => {
       // Only handle file uploads that are not from bots and have files
       if (event.subtype === 'file_share' && 'user' in event && event.files) {
         this.logger.info('Handling file upload event');
@@ -741,7 +896,7 @@ export class SlackHandler {
     });
 
     // Handle bot being added to channels
-    this.app.event('member_joined_channel', async ({ event, say }) => {
+    this.app.event('member_joined_channel', async ({ event, say }: { event: any; say: any }) => {
       // Check if the bot was added to the channel
       if (event.user === await this.getBotUserId()) {
         this.logger.info('Bot added to channel', { channel: event.channel });
@@ -750,31 +905,59 @@ export class SlackHandler {
     });
 
     // Handle permission approval button clicks
-    this.app.action('approve_tool', async ({ ack, body, respond }) => {
+    this.app.action('approve_tool', async ({ ack, body }: { ack: any; body: any }) => {
       await ack();
       const approvalId = (body as any).actions[0].value;
       this.logger.info('Tool approval granted', { approvalId });
-      
-      permissionServer.resolveApproval(approvalId, true);
-      
-      await respond({
-        response_type: 'ephemeral',
-        text: '✅ Tool execution approved'
-      });
+
+      const pending = this.pendingApprovals.get(approvalId);
+      if (pending) {
+        // Update the message to show approval
+        try {
+          await this.app.client.chat.update({
+            channel: pending.channel,
+            ts: pending.messageTs,
+            text: '✅ Tool execution approved',
+            blocks: []
+          });
+        } catch (e) {
+          this.logger.debug('Failed to update approval message', e);
+        }
+
+        // Resolve with the original input (stored in approvalId data)
+        const inputData = JSON.parse(approvalId.split('::')[1] || '{}');
+        pending.resolve({ behavior: 'allow', updatedInput: inputData });
+        this.pendingApprovals.delete(approvalId);
+      } else {
+        this.logger.warn('No pending approval found for', { approvalId });
+      }
     });
 
     // Handle permission denial button clicks
-    this.app.action('deny_tool', async ({ ack, body, respond }) => {
+    this.app.action('deny_tool', async ({ ack, body }: { ack: any; body: any }) => {
       await ack();
       const approvalId = (body as any).actions[0].value;
       this.logger.info('Tool approval denied', { approvalId });
-      
-      permissionServer.resolveApproval(approvalId, false);
-      
-      await respond({
-        response_type: 'ephemeral',
-        text: '❌ Tool execution denied'
-      });
+
+      const pending = this.pendingApprovals.get(approvalId);
+      if (pending) {
+        // Update the message to show denial
+        try {
+          await this.app.client.chat.update({
+            channel: pending.channel,
+            ts: pending.messageTs,
+            text: '❌ Tool execution denied',
+            blocks: []
+          });
+        } catch (e) {
+          this.logger.debug('Failed to update denial message', e);
+        }
+
+        pending.resolve({ behavior: 'deny', message: 'User denied this action' });
+        this.pendingApprovals.delete(approvalId);
+      } else {
+        this.logger.warn('No pending approval found for', { approvalId });
+      }
     });
 
     // Cleanup inactive sessions periodically

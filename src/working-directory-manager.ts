@@ -97,7 +97,7 @@ export class WorkingDirectoryManager {
   }
 
   getWorkingDirectory(channelId: string, threadTs?: string, userId?: string): string | undefined {
-    // Priority: Thread > Channel/DM
+    // Priority: Thread > Channel/DM > PROJECT_ROOT
     if (threadTs) {
       const threadKey = this.getConfigKey(channelId, threadTs);
       const threadConfig = this.configs.get(threadKey);
@@ -119,6 +119,15 @@ export class WorkingDirectoryManager {
         channelId,
       });
       return channelConfig.directory;
+    }
+
+    // Fall back to PROJECT_ROOT if configured
+    if (config.projectRoot) {
+      this.logger.debug('Using PROJECT_ROOT as default working directory', {
+        directory: config.projectRoot,
+        channelId,
+      });
+      return config.projectRoot;
     }
 
     this.logger.debug('No working directory configured', { channelId, threadTs });
