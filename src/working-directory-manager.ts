@@ -1,6 +1,6 @@
-import { WorkingDirectoryConfig } from './types';
-import { Logger } from './logger';
-import { config } from './config';
+import { WorkingDirectoryConfig } from './types.js';
+import { Logger } from './logger.js';
+import { config } from './config.js';
 import * as path from 'path';
 import * as fs from 'fs';
 

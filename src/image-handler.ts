@@ -1,5 +1,5 @@
 import * as fs from 'fs';
-import { Logger } from './logger';
+import { Logger } from './logger.js';
 
 export class ImageHandler {
   private logger = new Logger('ImageHandler');

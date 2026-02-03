@@ -1,13 +1,13 @@
 import pkg from '@slack/bolt';
 const { App } = pkg;
-import { ClaudeHandler, PermissionHandler } from './claude-handler';
+import { ClaudeHandler, PermissionHandler } from './claude-handler.js';
 import { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { Logger } from './logger';
-import { WorkingDirectoryManager } from './working-directory-manager';
-import { FileHandler, ProcessedFile } from './file-handler';
-import { TodoManager, Todo } from './todo-manager';
-import { McpManager } from './mcp-manager';
-import { config } from './config';
+import { Logger } from './logger.js';
+import { WorkingDirectoryManager } from './working-directory-manager.js';
+import { FileHandler, ProcessedFile } from './file-handler.js';
+import { TodoManager, Todo } from './todo-manager.js';
+import { McpManager } from './mcp-manager.js';
+import { config } from './config.js';
 
 // Permission approval response type
 type PermissionResponse =

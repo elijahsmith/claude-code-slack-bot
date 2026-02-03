@@ -1,4 +1,4 @@
-import { config } from './config';
+import { config } from './config.js';
 
 export class Logger {
   private context: string;

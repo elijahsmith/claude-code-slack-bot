@@ -1,9 +1,9 @@
 import { query, type SDKMessage, type HookCallback, type PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import path from 'path';
-import { ConversationSession } from './types';
-import { Logger } from './logger';
-import { McpManager, McpServerConfig } from './mcp-manager';
-import { config } from './config';
+import { ConversationSession } from './types.js';
+import { Logger } from './logger.js';
+import { McpManager, McpServerConfig } from './mcp-manager.js';
+import { config } from './config.js';
 
 // Permission handler type - returns allow/deny decision
 export type PermissionHandler = (
