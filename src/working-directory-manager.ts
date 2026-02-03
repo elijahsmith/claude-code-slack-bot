@@ -97,7 +97,7 @@ export class WorkingDirectoryManager {
   }
 
   getWorkingDirectory(channelId: string, threadTs?: string, userId?: string): string | undefined {
-    // Priority: Thread > Channel/DM > PROJECT_ROOT
+    // Priority: Thread > Channel/DM
     if (threadTs) {
       const threadKey = this.getConfigKey(channelId, threadTs);
       const threadConfig = this.configs.get(threadKey);
@@ -114,14 +114,14 @@ export class WorkingDirectoryManager {
     const channelKey = this.getConfigKey(channelId, undefined, userId);
     const channelConfig = this.configs.get(channelKey);
     if (channelConfig) {
+      this.logger.debug('Using channel/DM working directory', {
+        directory: channelConfig.directory,
+        channelId,
+      });
       return channelConfig.directory;
     }
 
-    // Fall back to PROJECT_ROOT if configured
-    if (config.projectRoot) {
-      return config.projectRoot;
-    }
-
+    this.logger.debug('No working directory configured', { channelId, threadTs });
     return undefined;
   }
 
