@@ -706,7 +706,6 @@ export class SlackHandler {
     // Check if we're already showing this emoji
     const currentEmoji = this.currentReactions.get(sessionKey);
     if (currentEmoji === slackEmoji) {
-      this.logger.debug('Reaction already set, skipping', { sessionKey, emoji: slackEmoji });
       return;
     }
 
@@ -719,13 +718,8 @@ export class SlackHandler {
             timestamp: originalMessage.ts,
             name: currentEmoji,
           });
-          this.logger.debug('Removed previous reaction', { sessionKey, emoji: currentEmoji });
         } catch (error) {
-          this.logger.debug('Failed to remove previous reaction (might not exist)', { 
-            sessionKey, 
-            emoji: currentEmoji,
-            error: (error as any).message 
-          });
+          // Ignore errors - reaction might not exist
         }
       }
 
@@ -741,19 +735,10 @@ export class SlackHandler {
         if (addError?.data?.error !== 'already_reacted') {
           throw addError;
         }
-        this.logger.debug('Reaction already exists, continuing', { sessionKey, emoji: slackEmoji });
       }
 
       // Track the current reaction (store Slack name for removal later)
       this.currentReactions.set(sessionKey, slackEmoji);
-
-      this.logger.debug('Updated message reaction', {
-        sessionKey,
-        emoji: slackEmoji,
-        previousEmoji: currentEmoji,
-        channel: originalMessage.channel,
-        ts: originalMessage.ts
-      });
     } catch (error) {
       this.logger.warn('Failed to update message reaction', error);
     }
@@ -921,7 +906,7 @@ export class SlackHandler {
             blocks: []
           });
         } catch (e) {
-          this.logger.debug('Failed to update approval message', e);
+          // Ignore update errors
         }
 
         // Resolve with the original input (stored in approvalId data)
@@ -950,7 +935,7 @@ export class SlackHandler {
             blocks: []
           });
         } catch (e) {
-          this.logger.debug('Failed to update denial message', e);
+          // Ignore update errors
         }
 
         pending.resolve({ behavior: 'deny', message: 'User denied this action' });

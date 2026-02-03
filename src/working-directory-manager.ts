@@ -114,23 +114,14 @@ export class WorkingDirectoryManager {
     const channelKey = this.getConfigKey(channelId, undefined, userId);
     const channelConfig = this.configs.get(channelKey);
     if (channelConfig) {
-      this.logger.debug('Using channel/DM working directory', {
-        directory: channelConfig.directory,
-        channelId,
-      });
       return channelConfig.directory;
     }
 
     // Fall back to PROJECT_ROOT if configured
     if (config.projectRoot) {
-      this.logger.debug('Using PROJECT_ROOT as default working directory', {
-        directory: config.projectRoot,
-        channelId,
-      });
       return config.projectRoot;
     }
 
-    this.logger.debug('No working directory configured', { channelId, threadTs });
     return undefined;
   }
 

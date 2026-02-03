@@ -43,12 +43,6 @@ const createCwdAutoApproveHook = (logger: Logger): HookCallback => async (input,
   const normalizedCwd = path.resolve(cwd);
 
   if (absolutePath.startsWith(normalizedCwd + path.sep) || absolutePath === normalizedCwd) {
-    logger.debug('Auto-approving file operation within cwd', {
-      tool: toolName,
-      filePath,
-      absolutePath,
-      cwd: normalizedCwd
-    });
     return {
       hookSpecificOutput: {
         hookEventName: input.hook_event_name,
@@ -124,17 +118,13 @@ export class ClaudeHandler {
         length: config.systemPrompt.length,
         preview: config.systemPrompt.substring(0, 100) + '...'
       });
-    } else {
-      this.logger.debug('No custom system prompt configured');
     }
 
     // Add canUseTool callback for permission handling via Slack
     if (permissionHandler) {
       options.canUseTool = async (toolName: string, input: Record<string, unknown>) => {
-        this.logger.debug('Permission requested for tool', { toolName, input });
         return await permissionHandler(toolName, input);
       };
-      this.logger.debug('Added canUseTool callback for Slack permission handling');
     }
 
     if (workingDirectory) {
@@ -147,7 +137,6 @@ export class ClaudeHandler {
           { matcher: 'Read|Edit|Write|Glob|Grep', hooks: [createCwdAutoApproveHook(this.logger)] }
         ]
       };
-      this.logger.debug('Added cwd auto-approve hook for file operations', { cwd: workingDirectory });
     }
 
     // Add MCP server configuration if available
