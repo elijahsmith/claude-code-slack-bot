@@ -7,7 +7,7 @@ import { WorkingDirectoryManager } from './working-directory-manager.js';
 import { FileHandler, ProcessedFile } from './file-handler.js';
 import { TodoManager, Todo } from './todo-manager.js';
 import { McpManager } from './mcp-manager.js';
-import { config } from './config.js';
+import { config, isToolAllowed } from './config.js';
 
 // Permission approval response type
 type PermissionResponse =
@@ -586,6 +586,13 @@ export class SlackHandler {
   // Create a permission handler for Slack-based tool approval
   private createPermissionHandler(channel: string, threadTs: string, user: string): PermissionHandler {
     return async (toolName: string, input: Record<string, unknown>): Promise<PermissionResponse> => {
+      // Check allowlist first - auto-approve if tool matches
+      if (isToolAllowed(toolName, input)) {
+        this.logger.debug('Tool auto-approved by allowlist', { toolName, input });
+        return { behavior: 'allow', updatedInput: input };
+      }
+
+      // Not in allowlist - request user approval via Slack
       // Generate unique approval ID (input stored in Map, not in button value)
       const approvalId = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
