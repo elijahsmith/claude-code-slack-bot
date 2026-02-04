@@ -1,5 +1,4 @@
-import { query, type SDKMessage, type HookCallback, type PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
-import path from 'path';
+import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { ConversationSession } from './types.js';
 import { Logger } from './logger.js';
 import { McpManager, McpServerConfig } from './mcp-manager.js';
@@ -10,63 +9,6 @@ export type PermissionHandler = (
   toolName: string,
   input: Record<string, unknown>
 ) => Promise<{ behavior: 'allow'; updatedInput: Record<string, unknown> } | { behavior: 'deny'; message: string }>;
-
-// Hook to auto-approve file operations within the working directory
-const createCwdAutoApproveHook = (logger: Logger): HookCallback => async (input, toolUseID, { signal }) => {
-  if (input.hook_event_name !== 'PreToolUse') return {};
-
-  const preInput = input as PreToolUseHookInput;
-  const toolName = preInput.tool_name;
-  const cwd = preInput.cwd;
-
-  // Only handle file-related tools
-  const fileTools = ['Read', 'Edit', 'Write', 'Glob', 'Grep'];
-  if (!fileTools.includes(toolName)) return {};
-
-  // Get the file path from tool input
-  const toolInput = preInput.tool_input as Record<string, unknown>;
-  const filePath = (toolInput?.file_path as string) || (toolInput?.path as string);  // Glob uses 'path'
-
-  if (!filePath) {
-    // No file path specified (e.g., Grep without path uses cwd) - allow
-    return {
-      hookSpecificOutput: {
-        hookEventName: input.hook_event_name,
-        permissionDecision: 'allow',
-        permissionDecisionReason: 'Auto-approved: no specific path, defaults to cwd'
-      }
-    };
-  }
-
-  // Resolve to absolute path and check if within cwd
-  const absolutePath = path.resolve(cwd, filePath);
-  const normalizedCwd = path.resolve(cwd);
-
-  if (absolutePath.startsWith(normalizedCwd + path.sep) || absolutePath === normalizedCwd) {
-    return {
-      hookSpecificOutput: {
-        hookEventName: input.hook_event_name,
-        permissionDecision: 'allow',
-        permissionDecisionReason: 'Auto-approved: path is within working directory'
-      }
-    };
-  }
-
-  // Outside cwd - strictly deny
-  logger.warn('Blocked file operation outside cwd', {
-    tool: toolName,
-    filePath,
-    absolutePath,
-    cwd: normalizedCwd
-  });
-  return {
-    hookSpecificOutput: {
-      hookEventName: input.hook_event_name,
-      permissionDecision: 'deny',
-      permissionDecisionReason: `Access denied: path "${filePath}" is outside the working directory`
-    }
-  };
-};
 
 export class ClaudeHandler {
   private sessions: Map<string, ConversationSession> = new Map();
@@ -129,14 +71,7 @@ export class ClaudeHandler {
 
     if (workingDirectory) {
       options.cwd = workingDirectory;
-
-      // Add hook to auto-approve file operations within the working directory
-      // and deny operations outside the working directory
-      options.hooks = {
-        PreToolUse: [
-          { matcher: 'Read|Edit|Write|Glob|Grep', hooks: [createCwdAutoApproveHook(this.logger)] }
-        ]
-      };
+      // Docker container is the security boundary - cwd is just context for Claude
     }
 
     // Add MCP server configuration if available
