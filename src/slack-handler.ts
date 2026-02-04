@@ -45,13 +45,16 @@ export class SlackHandler {
   private currentReactions: Map<string, string> = new Map(); // sessionKey -> current emoji
   private botUserId: string | null = null;
   private userNameCache: Map<string, string> = new Map(); // userId -> displayName
-  // Pending permission approvals - approvalId -> { resolve, messageTs, channel, input }
+  // Pending permission approvals - approvalId -> { resolve, messageTs, channel, input, sessionKey }
   private pendingApprovals: Map<string, {
     resolve: (response: PermissionResponse) => void;
     messageTs: string;
     channel: string;
     input: Record<string, unknown>;
+    sessionKey: string;
   }> = new Map();
+  // Buffered tool_use content waiting to be displayed (after permission granted)
+  private pendingToolDisplay: Map<string, string> = new Map(); // sessionKey -> formatted content
 
   constructor(app: InstanceType<typeof App>, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
     this.app = app;
@@ -257,7 +260,7 @@ export class SlackHandler {
       await this.updateMessageReaction(sessionKey, '🤔');
 
       // Create permission handler for Slack-based approval
-      const permissionHandler = this.createPermissionHandler(channel, thread_ts || ts, user);
+      const permissionHandler = this.createPermissionHandler(channel, thread_ts || ts, user, sessionKey);
 
       for await (const message of this.claudeHandler.streamQuery(finalPrompt, session, abortController, workingDirectory, permissionHandler)) {
         if (abortController.signal.aborted) break;
@@ -268,10 +271,20 @@ export class SlackHandler {
           message: message,
         });
 
+        // Check if there's buffered tool content to display (means previous tool was approved)
+        const bufferedToolContent = this.pendingToolDisplay.get(sessionKey);
+        if (bufferedToolContent) {
+          this.pendingToolDisplay.delete(sessionKey);
+          await say({
+            text: bufferedToolContent,
+            thread_ts: thread_ts || ts,
+          });
+        }
+
         if (message.type === 'assistant') {
           // Check if this is a tool use message
           const hasToolUse = message.message.content?.some((part: any) => part.type === 'tool_use');
-          
+
           if (hasToolUse) {
             // Update status to show working
             if (statusMessageTs) {
@@ -286,7 +299,7 @@ export class SlackHandler {
             await this.updateMessageReaction(sessionKey, '⚙️');
 
             // Check for TodoWrite tool and handle it specially
-            const todoTool = message.message.content?.find((part: any) => 
+            const todoTool = message.message.content?.find((part: any) =>
               part.type === 'tool_use' && part.name === 'TodoWrite'
             );
 
@@ -294,13 +307,11 @@ export class SlackHandler {
               await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, thread_ts || ts, say);
             }
 
-            // For other tool use messages, format them immediately as new messages
+            // Buffer tool_use content - only display after next message arrives
+            // (which confirms permission was granted and tool executed)
             const toolContent = this.formatToolUse(message.message.content);
-            if (toolContent) { // Only send if there's content (TodoWrite returns empty string)
-              await say({
-                text: toolContent,
-                thread_ts: thread_ts || ts,
-              });
+            if (toolContent) {
+              this.pendingToolDisplay.set(sessionKey, toolContent);
             }
           } else {
             // Handle regular text content
@@ -335,6 +346,16 @@ export class SlackHandler {
             }
           }
         }
+      }
+
+      // Display any remaining buffered tool content
+      const finalBufferedContent = this.pendingToolDisplay.get(sessionKey);
+      if (finalBufferedContent) {
+        this.pendingToolDisplay.delete(sessionKey);
+        await say({
+          text: finalBufferedContent,
+          thread_ts: thread_ts || ts,
+        });
       }
 
       // Update status to completed
@@ -584,7 +605,7 @@ export class SlackHandler {
   }
 
   // Create a permission handler for Slack-based tool approval
-  private createPermissionHandler(channel: string, threadTs: string, user: string): PermissionHandler {
+  private createPermissionHandler(channel: string, threadTs: string, user: string, sessionKey: string): PermissionHandler {
     return async (toolName: string, input: Record<string, unknown>): Promise<PermissionResponse> => {
       // Check allowlist first - auto-approve if tool matches
       if (isToolAllowed(toolName, input)) {
@@ -595,6 +616,11 @@ export class SlackHandler {
       // Not in allowlist - request user approval via Slack
       // Generate unique approval ID (input stored in Map, not in button value)
       const approvalId = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+      // Helper to clear buffered tool display on denial
+      const clearPendingToolDisplay = () => {
+        this.pendingToolDisplay.delete(sessionKey);
+      };
 
       // Create approval message with buttons
       const blocks = [
@@ -652,6 +678,7 @@ export class SlackHandler {
 
         if (!result.ts) {
           this.logger.error('Failed to post permission message - no ts returned');
+          clearPendingToolDisplay();
           return { behavior: 'deny', message: 'Failed to request permission' };
         }
 
@@ -661,7 +688,8 @@ export class SlackHandler {
             resolve,
             messageTs: result.ts!,
             channel,
-            input
+            input,
+            sessionKey
           });
 
           // Set timeout (60 seconds - SDK limit)
@@ -678,12 +706,14 @@ export class SlackHandler {
                 blocks: []
               }).catch(() => {});
 
+              clearPendingToolDisplay();
               resolve({ behavior: 'deny', message: 'Permission request timed out' });
             }
           }, 55000); // 55 seconds to leave buffer before SDK's 60s timeout
         });
       } catch (error) {
         this.logger.error('Error posting permission request', error);
+        clearPendingToolDisplay();
         return { behavior: 'deny', message: 'Error requesting permission' };
       }
     };
@@ -946,6 +976,8 @@ export class SlackHandler {
           // Ignore update errors
         }
 
+        // Clear buffered tool display since permission was denied
+        this.pendingToolDisplay.delete(pending.sessionKey);
         pending.resolve({ behavior: 'deny', message: 'User denied this action' });
         this.pendingApprovals.delete(approvalId);
       } else {
