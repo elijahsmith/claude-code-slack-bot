@@ -45,11 +45,12 @@ export class SlackHandler {
   private currentReactions: Map<string, string> = new Map(); // sessionKey -> current emoji
   private botUserId: string | null = null;
   private userNameCache: Map<string, string> = new Map(); // userId -> displayName
-  // Pending permission approvals - approvalId -> { resolve, messageTs, channel }
+  // Pending permission approvals - approvalId -> { resolve, messageTs, channel, input }
   private pendingApprovals: Map<string, {
     resolve: (response: PermissionResponse) => void;
     messageTs: string;
     channel: string;
+    input: Record<string, unknown>;
   }> = new Map();
 
   constructor(app: InstanceType<typeof App>, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
@@ -585,8 +586,8 @@ export class SlackHandler {
   // Create a permission handler for Slack-based tool approval
   private createPermissionHandler(channel: string, threadTs: string, user: string): PermissionHandler {
     return async (toolName: string, input: Record<string, unknown>): Promise<PermissionResponse> => {
-      // Generate unique approval ID that includes the input data
-      const approvalId = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}::${JSON.stringify(input)}`;
+      // Generate unique approval ID (input stored in Map, not in button value)
+      const approvalId = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
       // Create approval message with buttons
       const blocks = [
@@ -652,7 +653,8 @@ export class SlackHandler {
           this.pendingApprovals.set(approvalId, {
             resolve,
             messageTs: result.ts!,
-            channel
+            channel,
+            input
           });
 
           // Set timeout (60 seconds - SDK limit)
@@ -909,9 +911,8 @@ export class SlackHandler {
           // Ignore update errors
         }
 
-        // Resolve with the original input (stored in approvalId data)
-        const inputData = JSON.parse(approvalId.split('::')[1] || '{}');
-        pending.resolve({ behavior: 'allow', updatedInput: inputData });
+        // Resolve with the original input (stored in Map)
+        pending.resolve({ behavior: 'allow', updatedInput: pending.input });
         this.pendingApprovals.delete(approvalId);
       } else {
         this.logger.warn('No pending approval found for', { approvalId });
