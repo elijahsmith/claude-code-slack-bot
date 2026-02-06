@@ -24,7 +24,7 @@ function parseAllowedTools(): string[] {
   const toolsEnv = process.env.ALLOWED_TOOLS || '';
   if (!toolsEnv.trim()) {
     // Default: allow common file operations and safe commands
-    return ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Task', 'Bash:git *', 'Bash:npm *', 'Bash:npx *', 'Bash:bd *', 'Bash:glab *'];
+    return ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Task', 'Skill', 'Bash:git *', 'Bash:npm *', 'Bash:npx *', 'Bash:bd *', 'Bash:glab *'];
   }
   return toolsEnv.split(',').map(t => t.trim()).filter(Boolean);
 }
