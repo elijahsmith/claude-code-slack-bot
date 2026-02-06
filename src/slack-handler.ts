@@ -62,6 +62,7 @@ export class SlackHandler {
     this.mcpManager = mcpManager;
     this.workingDirManager = new WorkingDirectoryManager();
     this.fileHandler = new FileHandler();
+    this.fileHandler.setSlackClient(app.client);
     this.todoManager = new TodoManager();
   }
 

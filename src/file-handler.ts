@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { Logger } from './logger.js';
 import { config } from './config.js';
+import type { WebClient } from '@slack/bolt';
 
 export interface ProcessedFile {
   path: string;
@@ -17,6 +18,11 @@ export interface ProcessedFile {
 
 export class FileHandler {
   private logger = new Logger('FileHandler');
+  private slackClient?: WebClient;
+
+  setSlackClient(client: WebClient): void {
+    this.slackClient = client;
+  }
 
   async downloadAndProcessFiles(files: any[]): Promise<ProcessedFile[]> {
     const processedFiles: ProcessedFile[] = [];
@@ -43,9 +49,34 @@ export class FileHandler {
     }
 
     try {
-      this.logger.debug('Downloading file', { name: file.name, mimetype: file.mimetype });
+      // If we have a Slack client and file ID, use files.info to get proper download URL
+      let downloadUrl = file.url_private || file.url_private_download;
+      let fileInfo = file;
 
-      const response = await fetch(file.url_private_download, {
+      if (this.slackClient && file.id) {
+        try {
+          this.logger.debug('Fetching file info from Slack API', { fileId: file.id });
+          const response = await this.slackClient.files.info({ file: file.id });
+          if (response.ok && response.file) {
+            fileInfo = response.file;
+            downloadUrl = (fileInfo as any).url_private_download || (fileInfo as any).url_private;
+            this.logger.debug('Got file info from API', {
+              name: fileInfo.name,
+              url_private_download: (fileInfo as any).url_private_download,
+            });
+          }
+        } catch (error) {
+          this.logger.warn('Failed to fetch file info, using event data', { fileId: file.id, error });
+        }
+      }
+
+      this.logger.debug('Downloading file', {
+        name: fileInfo.name,
+        mimetype: fileInfo.mimetype,
+        downloadUrl,
+      });
+
+      const response = await fetch(downloadUrl, {
         headers: {
           'Authorization': `Bearer ${config.slack.botToken}`,
         },
@@ -55,24 +86,35 @@ export class FileHandler {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
+      // Check Content-Type to ensure we're not getting HTML
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('text/html')) {
+        this.logger.error('Received HTML instead of file content', {
+          name: fileInfo.name,
+          contentType,
+          url: downloadUrl
+        });
+        throw new Error('Received HTML page instead of file content - check Slack file sharing permissions');
+      }
+
       const buffer = await response.buffer();
       const tempDir = os.tmpdir();
-      const tempPath = path.join(tempDir, `slack-file-${Date.now()}-${file.name}`);
-      
+      const tempPath = path.join(tempDir, `slack-file-${Date.now()}-${fileInfo.name}`);
+
       fs.writeFileSync(tempPath, buffer);
 
       const processed: ProcessedFile = {
         path: tempPath,
-        name: file.name,
-        mimetype: file.mimetype,
-        isImage: this.isImageFile(file.mimetype),
-        isText: this.isTextFile(file.mimetype),
-        size: file.size,
+        name: fileInfo.name,
+        mimetype: fileInfo.mimetype,
+        isImage: this.isImageFile(fileInfo.mimetype),
+        isText: this.isTextFile(fileInfo.mimetype),
+        size: fileInfo.size,
         tempPath,
       };
 
       this.logger.info('File downloaded successfully', {
-        name: file.name,
+        name: fileInfo.name,
         tempPath,
         isImage: processed.isImage,
         isText: processed.isText,
