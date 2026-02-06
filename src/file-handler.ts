@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { Logger } from './logger.js';
 import { config } from './config.js';
-import type { WebClient } from '@slack/bolt';
+import type { WebClient } from '@slack/web-api';
 
 export interface ProcessedFile {
   path: string;
