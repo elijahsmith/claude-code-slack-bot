@@ -1021,14 +1021,30 @@ export class SlackHandler {
     const restartSession = this.restartManager.getPendingRestart();
     if (restartSession) {
       try {
-        await this.app.client.chat.postMessage({
+        // Create a synthetic message event to resume the conversation
+        const syntheticEvent: MessageEvent = {
+          user: restartSession.userId,
           channel: restartSession.channel,
           thread_ts: restartSession.threadTs,
-          text: '✅ Restart complete! I\'m back online and ready to continue.',
-        });
-        this.logger.info('Sent restart notification', { sessionKey: restartSession.sessionKey });
+          ts: new Date().getTime().toString(),
+          text: 'continue', // Simple prompt to resume
+        };
+
+        // Create a say function that posts to the correct channel/thread
+        const say = async (message: any) => {
+          await this.app.client.chat.postMessage({
+            channel: restartSession.channel,
+            thread_ts: restartSession.threadTs,
+            text: message.text || message,
+            blocks: message.blocks,
+          });
+        };
+
+        // Resume the conversation by handling the message
+        this.logger.info('Resuming conversation after restart', { sessionKey: restartSession.sessionKey });
+        await this.handleMessage(syntheticEvent, say);
       } catch (error) {
-        this.logger.error('Failed to send restart notification', error);
+        this.logger.error('Failed to resume conversation after restart', error);
       }
     }
 
