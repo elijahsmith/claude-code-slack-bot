@@ -166,7 +166,7 @@ export class MessageManager {
 
     if (accumulated.length <= recentCount) {
       // Few enough to show all
-      const fullOutput = accumulated.join('\n---\n');
+      const fullOutput = accumulated.join('\n');
       return {
         text: 'Tool output',
         blocks: [
@@ -174,7 +174,7 @@ export class MessageManager {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: `\`\`\`\n${fullOutput}\n\`\`\``,
+              text: fullOutput,
             },
           },
         ],
@@ -190,12 +190,12 @@ export class MessageManager {
     // Show older calls (expanded or summary)
     if (isExpanded) {
       // Show all older calls
-      const olderOutput = older.join('\n---\n');
+      const olderOutput = older.join('\n');
       blocks.push({
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `\`\`\`\n${olderOutput}\n\`\`\``,
+          text: olderOutput,
         },
       });
       // Toggle button after expanded content
@@ -234,12 +234,12 @@ export class MessageManager {
     }
 
     // Show recent calls
-    const recentOutput = recent.join('\n---\n');
+    const recentOutput = recent.join('\n');
     blocks.push({
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `\`\`\`\n${recentOutput}\n\`\`\``,
+        text: recentOutput,
       },
     });
 
