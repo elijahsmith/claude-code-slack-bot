@@ -103,6 +103,17 @@ export class MessageManager {
 
     const existing = this.toolOutputMessages.get(sessionKey);
 
+    // Use blocks with section to get Slack's collapse behavior
+    const blocks = [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: formattedOutput,
+        },
+      },
+    ];
+
     if (existing) {
       // Update in place
       try {
@@ -110,6 +121,7 @@ export class MessageManager {
           channel,
           ts: existing.ts,
           text: formattedOutput,
+          blocks,
         });
         existing.lastUpdated = new Date();
         this.logger.debug('Updated tool output message', { sessionKey, ts: existing.ts });
@@ -122,6 +134,7 @@ export class MessageManager {
         channel,
         thread_ts: threadTs,
         text: formattedOutput,
+        blocks,
       });
 
       if (result.ts) {
