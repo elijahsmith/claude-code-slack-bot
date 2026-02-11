@@ -221,7 +221,7 @@ export class MessageManager {
             type: 'plain_text',
             text: isExpanded ? 'Hide Older Calls' : 'Show All Calls',
           },
-          action_id: `toggle_tool_history_${sessionKey}`,
+          action_id: 'toggle_tool_history',
           value: sessionKey,
         },
       ],

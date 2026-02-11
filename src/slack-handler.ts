@@ -996,7 +996,7 @@ export class SlackHandler {
     });
 
     // Handle tool history toggle button clicks
-    this.app.action(/^toggle_tool_history_/, async ({ ack, body }: { ack: any; body: any }) => {
+    this.app.action('toggle_tool_history', async ({ ack, body }: { ack: any; body: any }) => {
       await ack();
 
       const sessionKey = (body as any).actions[0].value;
