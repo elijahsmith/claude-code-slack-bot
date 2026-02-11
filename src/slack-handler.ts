@@ -1,5 +1,4 @@
-import pkg from '@slack/bolt';
-const { App } = pkg;
+import { App } from '@slack/bolt';
 import { ClaudeHandler, PermissionHandler } from './claude-handler.js';
 import { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { Logger } from './logger.js';
@@ -768,7 +767,7 @@ export class SlackHandler {
                 channel,
                 thread_ts: threadTs,
                 text: '⏸️ Tool permission timed out. Please provide guidance on how to proceed.',
-              }).catch((e) => {
+              }).catch((e: unknown) => {
                 this.logger.warn('Failed to post timeout message', e);
               });
 
@@ -1066,5 +1065,46 @@ export class SlackHandler {
       this.logger.debug('Running session cleanup');
       this.claudeHandler.cleanupInactiveSessions();
     }, 5 * 60 * 1000); // Every 5 minutes
+  }
+
+  async sendStartupNotifications() {
+    try {
+      const configs = this.workingDirManager.listConfigurations();
+      const channelConfigs = configs.filter(config => !config.threadTs && !config.userId);
+
+      if (channelConfigs.length === 0) {
+        this.logger.info('No channels with configured working directories');
+        return;
+      }
+
+      this.logger.info('Sending startup notifications', { count: channelConfigs.length });
+
+      for (const config of channelConfigs) {
+        try {
+          const channelInfo = await this.app.client.conversations.info({
+            channel: config.channelId,
+          });
+
+          const channelName = (channelInfo.channel as any)?.name || config.channelId;
+
+          await this.app.client.chat.postMessage({
+            channel: config.channelId,
+            text: `👋 I'm back online! Working directory for #${channelName}: \`${config.directory}\``,
+          });
+
+          this.logger.info('Sent startup notification', {
+            channel: channelName,
+            directory: config.directory,
+          });
+        } catch (error) {
+          this.logger.error('Failed to send startup notification to channel', {
+            channelId: config.channelId,
+            error,
+          });
+        }
+      }
+    } catch (error) {
+      this.logger.error('Failed to send startup notifications', error);
+    }
   }
 }

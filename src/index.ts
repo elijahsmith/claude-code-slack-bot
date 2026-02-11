@@ -1,5 +1,4 @@
-import pkg from '@slack/bolt';
-const { App } = pkg;
+import { App } from '@slack/bolt';
 import { config, validateConfig } from './config.js';
 import { ClaudeHandler } from './claude-handler.js';
 import { SlackHandler } from './slack-handler.js';
@@ -30,7 +29,7 @@ async function start() {
     // Initialize MCP manager
     const mcpManager = new McpManager();
     const mcpConfig = mcpManager.loadConfiguration();
-    
+
     // Initialize handlers
     const claudeHandler = new ClaudeHandler(mcpManager);
     const slackHandler = new SlackHandler(app, claudeHandler, mcpManager);
@@ -50,6 +49,9 @@ async function start() {
       mcpServers: mcpConfig ? Object.keys(mcpConfig.mcpServers).length : 0,
       mcpServerNames: mcpConfig ? Object.keys(mcpConfig.mcpServers) : [],
     });
+
+    // Send startup notifications to all channels with configured working directories
+    await slackHandler.sendStartupNotifications();
   } catch (error) {
     logger.error('Failed to start the bot', error);
     process.exit(1);
