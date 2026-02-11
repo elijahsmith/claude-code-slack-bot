@@ -209,31 +209,6 @@ export class TodoManager {
     return null;
   }
 
-  /**
-   * Determine if a change is significant enough to bump the task list
-   */
-  shouldBumpTaskList(oldTodos: Todo[], newTodos: Todo[]): boolean {
-    // Check if any task status changed
-    for (const newTodo of newTodos) {
-      const oldTodo = oldTodos.find(t => t.id === newTodo.id);
-
-      if (!oldTodo) {
-        // New task added
-        return true;
-      } else if (oldTodo.status !== newTodo.status) {
-        // Status changed
-        return true;
-      }
-    }
-
-    // Check if any task was removed
-    if (oldTodos.length !== newTodos.length) {
-      return true;
-    }
-
-    return false;
-  }
-
   cleanupSession(sessionId: string): void {
     this.todos.delete(sessionId);
     this.lastUpdate.delete(sessionId);

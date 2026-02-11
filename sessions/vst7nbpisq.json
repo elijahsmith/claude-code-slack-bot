@@ -1,0 +1,15 @@
+{
+  "session_id": "vst7nbpisq",
+  "device_code": "oqBBFAHzDAsXe6te4b9-EVsj",
+  "user_code": "LBLB-GFHX",
+  "verification_uri": "https://apolloag.eu.auth0.com/activate",
+  "verification_uri_complete": "https://apolloag.eu.auth0.com/activate?user_code=LBLB-GFHX",
+  "expires_in": 900,
+  "interval": 5,
+  "expires_at": 1770839330,
+  "status": "pending",
+  "created_at": 1770838430,
+  "access_token": null,
+  "token_type": null,
+  "refresh_token": null
+}

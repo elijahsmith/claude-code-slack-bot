@@ -510,9 +510,6 @@ export class SlackHandler {
 
     // Check if there's a significant change
     if (this.todoManager.hasSignificantChange(oldTodos, newTodos)) {
-      // Determine if we should bump
-      const shouldBump = this.todoManager.shouldBumpTaskList(oldTodos, newTodos);
-
       // Get recent change description
       const recentChange = this.todoManager.getRecentChangeDescription(oldTodos, newTodos);
 
@@ -523,7 +520,7 @@ export class SlackHandler {
       const todoList = this.todoManager.formatTodoList(newTodos, sessionId, recentChange || undefined);
 
       // Update task list using MessageManager
-      await this.messageManager.updateTaskList(sessionKey, todoList, channel, threadTs, shouldBump);
+      await this.messageManager.updateTaskList(sessionKey, todoList, channel, threadTs);
 
       // Update reaction based on overall progress
       await this.updateTaskProgressReaction(sessionKey, newTodos);
