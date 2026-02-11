@@ -53,8 +53,10 @@ export class SlackHandler {
     input: Record<string, unknown>;
     sessionKey: string;
   }> = new Map();
-  // Buffered tool_use content waiting to be displayed (after permission granted)
-  private pendingToolDisplay: Map<string, string> = new Map(); // sessionKey -> formatted content
+  // Tool output tracking - accumulate all tool uses in a single updatable message
+  private toolMessages: Map<string, string> = new Map(); // sessionKey -> messageTs
+  private accumulatedToolOutput: Map<string, string[]> = new Map(); // sessionKey -> array of tool outputs
+  private pendingToolDisplay: Map<string, string> = new Map(); // sessionKey -> pending tool display message
 
   constructor(app: InstanceType<typeof App>, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
     this.app = app;
@@ -68,13 +70,28 @@ export class SlackHandler {
 
   async handleMessage(event: MessageEvent, say: any) {
     const { user, channel, thread_ts, ts, text, files } = event;
-    
+
+    // If message starts with @mention to another user (not this bot), ignore it
+    if (text && text.trim().startsWith('<@')) {
+      const mentionMatch = text.match(/^<@([^>]+)>/);
+      if (mentionMatch) {
+        const mentionedUserId = mentionMatch[1];
+        const botUserId = await this.getBotUserId();
+
+        // If the mention is NOT to this bot, ignore the message
+        if (mentionedUserId !== botUserId) {
+          this.logger.debug('Ignoring message that mentions another user', { mentionedUserId, botUserId });
+          return;
+        }
+      }
+    }
+
     // Process any attached files
     let processedFiles: ProcessedFile[] = [];
     if (files && files.length > 0) {
       this.logger.info('Processing uploaded files', { count: files.length });
       processedFiles = await this.fileHandler.downloadAndProcessFiles(files);
-      
+
       if (processedFiles.length > 0) {
         await say({
           text: `📎 Processing ${processedFiles.length} file(s): ${processedFiles.map(f => f.name).join(', ')}`,
@@ -272,16 +289,6 @@ export class SlackHandler {
           message: message,
         });
 
-        // Check if there's buffered tool content to display (means previous tool was approved)
-        const bufferedToolContent = this.pendingToolDisplay.get(sessionKey);
-        if (bufferedToolContent) {
-          this.pendingToolDisplay.delete(sessionKey);
-          await say({
-            text: bufferedToolContent,
-            thread_ts: thread_ts || ts,
-          });
-        }
-
         if (message.type === 'assistant') {
           // Check if this is a tool use message
           const hasToolUse = message.message.content?.some((part: any) => part.type === 'tool_use');
@@ -308,18 +315,17 @@ export class SlackHandler {
               await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, thread_ts || ts, say);
             }
 
-            // Buffer tool_use content - only display after next message arrives
-            // (which confirms permission was granted and tool executed)
+            // Accumulate tool output
             const toolContent = this.formatToolUse(message.message.content);
             if (toolContent) {
-              this.pendingToolDisplay.set(sessionKey, toolContent);
+              await this.accumulateAndDisplayToolOutput(sessionKey, toolContent, channel, thread_ts || ts, say);
             }
           } else {
-            // Handle regular text content
+            // Handle regular text content - this gets its own message
             const content = this.extractTextContent(message);
             if (content) {
               currentMessages.push(content);
-              
+
               // Send each new piece of content as a separate message
               const formatted = this.formatMessage(content, false);
               await say({
@@ -335,7 +341,7 @@ export class SlackHandler {
             totalCost: (message as any).total_cost_usd,
             duration: (message as any).duration_ms,
           });
-          
+
           if (message.subtype === 'success' && (message as any).result) {
             const finalResult = (message as any).result;
             if (finalResult && !currentMessages.includes(finalResult)) {
@@ -347,16 +353,6 @@ export class SlackHandler {
             }
           }
         }
-      }
-
-      // Display any remaining buffered tool content
-      const finalBufferedContent = this.pendingToolDisplay.get(sessionKey);
-      if (finalBufferedContent) {
-        this.pendingToolDisplay.delete(sessionKey);
-        await say({
-          text: finalBufferedContent,
-          thread_ts: thread_ts || ts,
-        });
       }
 
       // Update status to completed
@@ -423,7 +419,7 @@ export class SlackHandler {
     } finally {
       this.activeControllers.delete(sessionKey);
       
-      // Clean up todo tracking if session ended
+      // Clean up todo tracking and tool messages if session ended
       if (session?.sessionId) {
         // Don't immediately clean up - keep todos visible for a while
         setTimeout(() => {
@@ -431,6 +427,8 @@ export class SlackHandler {
           this.todoMessages.delete(sessionKey);
           this.originalMessages.delete(sessionKey);
           this.currentReactions.delete(sessionKey);
+          this.toolMessages.delete(sessionKey);
+          this.accumulatedToolOutput.delete(sessionKey);
         }, 5 * 60 * 1000); // 5 minutes
       }
     }
@@ -588,20 +586,76 @@ export class SlackHandler {
   }
 
   private async createNewTodoMessage(
-    todoList: string, 
-    channel: string, 
-    threadTs: string, 
-    sessionKey: string, 
+    todoList: string,
+    channel: string,
+    threadTs: string,
+    sessionKey: string,
     say: any
   ): Promise<void> {
     const result = await say({
       text: todoList,
       thread_ts: threadTs,
     });
-    
+
     if (result?.ts) {
       this.todoMessages.set(sessionKey, result.ts);
       this.logger.debug('Created new todo message', { sessionKey, messageTs: result.ts });
+    }
+  }
+
+  private async accumulateAndDisplayToolOutput(
+    sessionKey: string,
+    toolContent: string,
+    channel: string,
+    threadTs: string,
+    say: any
+  ): Promise<void> {
+    // Get or initialize accumulated tool output array
+    let accumulated = this.accumulatedToolOutput.get(sessionKey) || [];
+    accumulated.push(toolContent);
+    this.accumulatedToolOutput.set(sessionKey, accumulated);
+
+    // Format all tool output as a single code block
+    const formattedOutput = '```\n' + accumulated.join('\n\n---\n\n') + '\n```';
+
+    // Check if we already have a tool message for this session
+    const existingToolMessageTs = this.toolMessages.get(sessionKey);
+
+    if (existingToolMessageTs) {
+      // Update existing tool message
+      try {
+        await this.app.client.chat.update({
+          channel,
+          ts: existingToolMessageTs,
+          text: formattedOutput,
+        });
+        this.logger.debug('Updated existing tool message', { sessionKey, messageTs: existingToolMessageTs });
+      } catch (error) {
+        this.logger.warn('Failed to update tool message, creating new one', error);
+        // If update fails, create a new message
+        await this.createNewToolMessage(formattedOutput, channel, threadTs, sessionKey, say);
+      }
+    } else {
+      // Create new tool message
+      await this.createNewToolMessage(formattedOutput, channel, threadTs, sessionKey, say);
+    }
+  }
+
+  private async createNewToolMessage(
+    toolOutput: string,
+    channel: string,
+    threadTs: string,
+    sessionKey: string,
+    say: any
+  ): Promise<void> {
+    const result = await say({
+      text: toolOutput,
+      thread_ts: threadTs,
+    });
+
+    if (result?.ts) {
+      this.toolMessages.set(sessionKey, result.ts);
+      this.logger.debug('Created new tool message', { sessionKey, messageTs: result.ts });
     }
   }
 
@@ -977,8 +1031,6 @@ export class SlackHandler {
           // Ignore update errors
         }
 
-        // Clear buffered tool display since permission was denied
-        this.pendingToolDisplay.delete(pending.sessionKey);
         pending.resolve({ behavior: 'deny', message: 'User denied this action' });
         this.pendingApprovals.delete(approvalId);
       } else {

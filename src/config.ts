@@ -24,7 +24,39 @@ function parseAllowedTools(): string[] {
   const toolsEnv = process.env.ALLOWED_TOOLS || '';
   if (!toolsEnv.trim()) {
     // Default: allow common file operations and safe commands
-    return ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Task', 'Skill', 'Bash:git *', 'Bash:npm *', 'Bash:npx *', 'Bash:bd *', 'Bash:glab *'];
+    return [
+      'Read', 'Edit', 'Write', 'Glob', 'Grep', 'Task', 'Skill',
+      // Version control
+      'Bash:git *',
+      'Bash:glab *',
+      // Package management and Node.js
+      'Bash:npm *',
+      'Bash:npx *',
+      'Bash:node *',
+      // Beads task tracking
+      'Bash:bd *',
+      // File system operations (safe subset - no rm/mv)
+      'Bash:ls *',
+      'Bash:touch *',
+      'Bash:mkdir *',
+      'Bash:cp *',
+      'Bash:cat *',
+      'Bash:pwd',
+      'Bash:cd *',
+      // Search and text processing
+      'Bash:grep *',
+      'Bash:find *',
+      'Bash:sed *',
+      'Bash:awk *',
+      // Build and test
+      'Bash:make *',
+      'Bash:cargo *',
+      'Bash:go *',
+      // System info
+      'Bash:echo *',
+      'Bash:which *',
+      'Bash:env',
+    ];
   }
   return toolsEnv.split(',').map(t => t.trim()).filter(Boolean);
 }

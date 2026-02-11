@@ -3,6 +3,7 @@ import { ConversationSession } from './types.js';
 import { Logger } from './logger.js';
 import { McpManager, McpServerConfig } from './mcp-manager.js';
 import { config } from './config.js';
+import { storage } from './storage.js';
 
 // Permission handler type - returns allow/deny decision
 export type PermissionHandler = (
@@ -17,6 +18,27 @@ export class ClaudeHandler {
 
   constructor(mcpManager: McpManager) {
     this.mcpManager = mcpManager;
+    this.loadFromStorage();
+  }
+
+  private loadFromStorage() {
+    const stored = storage.listSessions();
+    for (const row of stored) {
+      const session: ConversationSession = {
+        userId: row.user_id,
+        channelId: row.channel_id,
+        threadTs: row.thread_ts || undefined,
+        // Restore sessionId - SDK will resume the conversation from disk
+        sessionId: row.session_id || undefined,
+        isActive: true,
+        lastActivity: new Date(row.last_activity),
+      };
+      this.sessions.set(row.session_key, session);
+    }
+    this.logger.info('Loaded sessions from storage', {
+      count: stored.length,
+      withSessionIds: stored.filter(s => s.session_id).length
+    });
   }
 
   getSessionKey(userId: string, channelId: string, threadTs?: string): string {
@@ -35,7 +57,12 @@ export class ClaudeHandler {
       isActive: true,
       lastActivity: new Date(),
     };
-    this.sessions.set(this.getSessionKey(userId, channelId, threadTs), session);
+    const sessionKey = this.getSessionKey(userId, channelId, threadTs);
+    this.sessions.set(sessionKey, session);
+
+    // Persist to storage
+    storage.saveSession(sessionKey, userId, channelId, threadTs, undefined);
+
     return session;
   }
 
@@ -118,6 +145,12 @@ export class ClaudeHandler {
         if (message.type === 'system' && message.subtype === 'init') {
           if (session) {
             session.sessionId = message.session_id;
+            session.lastActivity = new Date();
+
+            // Persist updated session with sessionId
+            const sessionKey = this.getSessionKey(session.userId, session.channelId, session.threadTs);
+            storage.saveSession(sessionKey, session.userId, session.channelId, session.threadTs, session.sessionId);
+
             this.logger.info('Session initialized', {
               sessionId: message.session_id,
               model: (message as any).model,
@@ -125,6 +158,12 @@ export class ClaudeHandler {
             });
           }
         }
+
+        // Update last activity timestamp for any message
+        if (session) {
+          session.lastActivity = new Date();
+        }
+
         yield message;
       }
     } catch (error) {
@@ -133,15 +172,20 @@ export class ClaudeHandler {
     }
   }
 
-  cleanupInactiveSessions(maxAge: number = 30 * 60 * 1000) {
+  cleanupInactiveSessions(maxAge: number = 14 * 24 * 60 * 60 * 1000) {
     const now = Date.now();
     let cleaned = 0;
     for (const [key, session] of this.sessions.entries()) {
       if (now - session.lastActivity.getTime() > maxAge) {
         this.sessions.delete(key);
+        storage.deleteSession(key);
         cleaned++;
       }
     }
+
+    // Also clean from storage (belt and suspenders)
+    storage.cleanOldSessions(maxAge);
+
     if (cleaned > 0) {
       this.logger.info(`Cleaned up ${cleaned} inactive sessions`);
     }

@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
+
+# Claude
 .claude/
+CLAUDE.local.md
 
 # Environment variables
 .env
@@ -11,6 +14,9 @@ mcp-servers.json
 
 # Build output
 dist/
+
+# Data (persistent storage)
+data/
 
 # IDE
 .vscode/

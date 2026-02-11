@@ -1,12 +1,32 @@
 import { WorkingDirectoryConfig } from './types.js';
 import { Logger } from './logger.js';
 import { config } from './config.js';
+import { storage } from './storage.js';
 import * as path from 'path';
 import * as fs from 'fs';
 
 export class WorkingDirectoryManager {
   private configs: Map<string, WorkingDirectoryConfig> = new Map();
   private logger = new Logger('WorkingDirectoryManager');
+
+  constructor() {
+    this.loadFromStorage();
+  }
+
+  private loadFromStorage() {
+    const stored = storage.listWorkingDirectories();
+    for (const row of stored) {
+      const config: WorkingDirectoryConfig = {
+        channelId: row.channel_id,
+        threadTs: row.thread_ts || undefined,
+        userId: row.user_id || undefined,
+        directory: row.directory,
+        setAt: new Date(row.set_at),
+      };
+      this.configs.set(row.key, config);
+    }
+    this.logger.info('Loaded working directories from storage', { count: stored.length });
+  }
 
   getConfigKey(channelId: string, threadTs?: string, userId?: string): string {
     if (threadTs) {
@@ -46,6 +66,10 @@ export class WorkingDirectoryManager {
       };
 
       this.configs.set(key, workingDirConfig);
+
+      // Persist to storage
+      storage.saveWorkingDirectory(key, channelId, resolvedPath, threadTs, userId);
+
       this.logger.info('Working directory set', {
         key,
         directory: resolvedPath,
@@ -128,6 +152,10 @@ export class WorkingDirectoryManager {
   removeWorkingDirectory(channelId: string, threadTs?: string, userId?: string): boolean {
     const key = this.getConfigKey(channelId, threadTs, userId);
     const result = this.configs.delete(key);
+
+    // Remove from storage
+    storage.deleteWorkingDirectory(key);
+
     if (result) {
       this.logger.info('Working directory removed', { key });
     }
