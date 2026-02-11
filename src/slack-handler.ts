@@ -45,11 +45,12 @@ export class SlackHandler {
   private currentReactions: Map<string, string> = new Map(); // sessionKey -> current emoji
   private botUserId: string | null = null;
   private userNameCache: Map<string, string> = new Map(); // userId -> displayName
-  // Pending permission approvals - approvalId -> { resolve, messageTs, channel, input, sessionKey }
+  // Pending permission approvals - approvalId -> { resolve, messageTs, channel, threadTs, input, sessionKey }
   private pendingApprovals: Map<string, {
     resolve: (response: PermissionResponse) => void;
     messageTs: string;
     channel: string;
+    threadTs: string;
     input: Record<string, unknown>;
     sessionKey: string;
   }> = new Map();
@@ -743,6 +744,7 @@ export class SlackHandler {
             resolve,
             messageTs: result.ts!,
             channel,
+            threadTs,
             input,
             sessionKey
           });
@@ -757,9 +759,18 @@ export class SlackHandler {
               this.app.client.chat.update({
                 channel,
                 ts: result.ts!,
-                text: '⏱️ Permission request timed out',
+                text: '⏱️ Permission request timed out - waiting for your guidance',
                 blocks: []
               }).catch(() => {});
+
+              // Post a message explaining that the bot is waiting for user input
+              this.app.client.chat.postMessage({
+                channel,
+                thread_ts: threadTs,
+                text: '⏸️ Tool permission timed out. Please provide guidance on how to proceed.',
+              }).catch((e) => {
+                this.logger.warn('Failed to post timeout message', e);
+              });
 
               clearPendingToolDisplay();
               resolve({ behavior: 'deny', message: 'Permission request timed out' });
@@ -1012,7 +1023,7 @@ export class SlackHandler {
     });
 
     // Handle permission denial button clicks
-    this.app.action('deny_tool', async ({ ack, body }: { ack: any; body: any }) => {
+    this.app.action('deny_tool', async ({ ack, body, say }: { ack: any; body: any; say: any }) => {
       await ack();
       const approvalId = (body as any).actions[0].value;
       this.logger.info('Tool approval denied', { approvalId });
@@ -1024,7 +1035,7 @@ export class SlackHandler {
           await this.app.client.chat.update({
             channel: pending.channel,
             ts: pending.messageTs,
-            text: '❌ Tool execution denied',
+            text: '❌ Tool execution denied - waiting for your guidance',
             blocks: []
           });
         } catch (e) {
@@ -1033,6 +1044,18 @@ export class SlackHandler {
 
         pending.resolve({ behavior: 'deny', message: 'User denied this action' });
         this.pendingApprovals.delete(approvalId);
+
+        // Post a message explaining that the bot is waiting for user input
+        // The SDK will send the denial to Claude, and the conversation remains active
+        try {
+          await this.app.client.chat.postMessage({
+            channel: pending.channel,
+            thread_ts: pending.threadTs,
+            text: '⏸️ Tool cancelled. Please provide guidance on how to proceed.',
+          });
+        } catch (e) {
+          this.logger.warn('Failed to post cancellation message', e);
+        }
       } else {
         this.logger.warn('No pending approval found for', { approvalId });
       }
