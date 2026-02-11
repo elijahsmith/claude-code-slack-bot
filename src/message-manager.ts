@@ -115,35 +115,32 @@ export class MessageManager {
     ];
 
     if (existing) {
-      // Update in place
+      // Delete old message to "bump" to bottom
       try {
-        await this.app.client.chat.update({
+        await this.app.client.chat.delete({
           channel,
           ts: existing.ts,
-          text: formattedOutput,
-          blocks,
         });
-        existing.lastUpdated = new Date();
-        this.logger.debug('Updated tool output message', { sessionKey, ts: existing.ts });
+        this.logger.debug('Deleted old tool output message for bump', { sessionKey, ts: existing.ts });
       } catch (error) {
-        this.logger.warn('Failed to update tool output message', error);
+        this.logger.warn('Failed to delete old tool output message', error);
       }
-    } else {
-      // Create new message
-      const result = await this.app.client.chat.postMessage({
-        channel,
-        thread_ts: threadTs,
-        text: formattedOutput,
-        blocks,
-      });
+    }
 
-      if (result.ts) {
-        this.toolOutputMessages.set(sessionKey, {
-          ts: result.ts,
-          lastUpdated: new Date(),
-        });
-        this.logger.debug('Created new tool output message', { sessionKey, ts: result.ts });
-      }
+    // Always create new message (either first time or after delete for bump)
+    const result = await this.app.client.chat.postMessage({
+      channel,
+      thread_ts: threadTs,
+      text: formattedOutput,
+      blocks,
+    });
+
+    if (result.ts) {
+      this.toolOutputMessages.set(sessionKey, {
+        ts: result.ts,
+        lastUpdated: new Date(),
+      });
+      this.logger.debug('Created new tool output message', { sessionKey, ts: result.ts });
     }
   }
 
