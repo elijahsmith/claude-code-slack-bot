@@ -167,6 +167,17 @@ export class ClaudeHandler {
         yield message;
       }
     } catch (error) {
+      // If session resume failed, clear the stale sessionId and let caller retry
+      if (session?.sessionId && error instanceof Error &&
+          (error.message.includes('exited with code 1') || error.message.includes('resume'))) {
+        this.logger.warn('Session resume failed, clearing stale session', {
+          sessionId: session.sessionId,
+          error: error.message
+        });
+        session.sessionId = undefined;
+        const sessionKey = this.getSessionKey(session.userId, session.channelId, session.threadTs);
+        storage.saveSession(sessionKey, session.userId, session.channelId, session.threadTs, undefined);
+      }
       this.logger.error('Error in Claude query', error);
       throw error;
     }
