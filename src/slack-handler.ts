@@ -828,27 +828,30 @@ export class SlackHandler {
 
   /**
    * Try to parse content as rich blocks JSON
-   * Format: ```slack-blocks\n{JSON}\n```
+   * Format: JSON object with __render_as: "slack_blocks"
    */
   private tryParseRichBlocks(content: string): { text: string; blocks: any[] } | null {
-    // Look for special marker: ```slack-blocks ... ```
-    const match = content.match(/```slack-blocks\s*\n([\s\S]*?)```/);
-    if (!match) {
+    // Trim whitespace
+    const trimmed = content.trim();
+
+    // Must start with { and end with }
+    if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
       return null;
     }
 
     try {
-      const json = JSON.parse(match[1]);
+      const json = JSON.parse(trimmed);
 
-      // Validate structure
-      if (json && typeof json === 'object' && Array.isArray(json.blocks)) {
+      // Check for special marker field
+      if (json && typeof json === 'object' && json.__render_as === 'slack_blocks' && Array.isArray(json.blocks)) {
         return {
           text: json.text || 'Rich message',
           blocks: json.blocks,
         };
       }
     } catch (error) {
-      this.logger.warn('Failed to parse slack-blocks JSON', error);
+      // Not valid JSON, that's fine
+      return null;
     }
 
     return null;
