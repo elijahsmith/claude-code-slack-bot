@@ -1023,7 +1023,7 @@ export class SlackHandler {
     });
 
     // Handle permission denial button clicks
-    this.app.action('deny_tool', async ({ ack, body, say }: { ack: any; body: any; say: any }) => {
+    this.app.action('deny_tool', async ({ ack, body }: { ack: any; body: any }) => {
       await ack();
       const approvalId = (body as any).actions[0].value;
       this.logger.info('Tool approval denied', { approvalId });
