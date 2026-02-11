@@ -1,4 +1,4 @@
-import { App } from '@slack/bolt';
+import slackBolt from '@slack/bolt';
 import { ClaudeHandler, PermissionHandler } from './claude-handler.js';
 import { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { Logger } from './logger.js';
@@ -7,6 +7,8 @@ import { FileHandler, ProcessedFile } from './file-handler.js';
 import { TodoManager, Todo } from './todo-manager.js';
 import { McpManager } from './mcp-manager.js';
 import { config, isToolAllowed } from './config.js';
+
+const { App } = slackBolt;
 
 // Permission approval response type
 type PermissionResponse =
