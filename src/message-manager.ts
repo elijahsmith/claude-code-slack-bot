@@ -198,38 +198,40 @@ export class MessageManager {
           text: `\`\`\`\n${olderOutput}\n\`\`\``,
         },
       });
-    } else {
-      // Show summary
+      // Toggle button after expanded content
       blocks.push({
-        type: 'context',
+        type: 'actions',
         elements: [
           {
-            type: 'mrkdwn',
-            text: `_${older.length} earlier tool calls_`,
+            type: 'button',
+            text: {
+              type: 'plain_text',
+              text: 'Hide Older Calls',
+            },
+            action_id: 'toggle_tool_history',
+            value: sessionKey,
           },
         ],
       });
-    }
-
-    // Toggle button
-    blocks.push({
-      type: 'actions',
-      elements: [
-        {
+    } else {
+      // Show summary with button on same line using section with accessory
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `_${older.length} earlier tool calls_`,
+        },
+        accessory: {
           type: 'button',
           text: {
             type: 'plain_text',
-            text: isExpanded ? 'Hide Older Calls' : 'Show All Calls',
+            text: 'Show All Calls',
           },
           action_id: 'toggle_tool_history',
           value: sessionKey,
         },
-      ],
-    });
-
-    blocks.push({
-      type: 'divider',
-    });
+      });
+    }
 
     // Show recent calls
     const recentOutput = recent.join('\n---\n');
