@@ -27,6 +27,9 @@ export class MessageManager {
   // Track accumulated tool output per session (full details)
   private accumulatedToolOutput: Map<string, string[]> = new Map();
 
+  // Track if text message was posted after tool output (determines if we need to bump)
+  private textMessageAfterTool: Map<string, boolean> = new Map();
+
   constructor(private app: InstanceType<typeof App>) {}
 
   /**
@@ -114,8 +117,10 @@ export class MessageManager {
       },
     ];
 
-    if (existing) {
-      // Delete old message to "bump" to bottom
+    const shouldBump = existing && this.textMessageAfterTool.get(sessionKey);
+
+    if (existing && shouldBump) {
+      // Delete old message to "bump" to bottom (only if text came after)
       try {
         await this.app.client.chat.delete({
           channel,
@@ -125,23 +130,56 @@ export class MessageManager {
       } catch (error) {
         this.logger.warn('Failed to delete old tool output message', error);
       }
-    }
 
-    // Always create new message (either first time or after delete for bump)
-    const result = await this.app.client.chat.postMessage({
-      channel,
-      thread_ts: threadTs,
-      text: formattedOutput,
-      blocks,
-    });
-
-    if (result.ts) {
-      this.toolOutputMessages.set(sessionKey, {
-        ts: result.ts,
-        lastUpdated: new Date(),
+      // Create new message at bottom
+      const result = await this.app.client.chat.postMessage({
+        channel,
+        thread_ts: threadTs,
+        text: formattedOutput,
+        blocks,
       });
-      this.logger.debug('Created new tool output message', { sessionKey, ts: result.ts });
+
+      if (result.ts) {
+        this.toolOutputMessages.set(sessionKey, {
+          ts: result.ts,
+          lastUpdated: new Date(),
+        });
+        this.logger.debug('Created new tool output message (bumped)', { sessionKey, ts: result.ts });
+      }
+    } else if (existing) {
+      // Update in place (tool is already at bottom)
+      try {
+        await this.app.client.chat.update({
+          channel,
+          ts: existing.ts,
+          text: formattedOutput,
+          blocks,
+        });
+        existing.lastUpdated = new Date();
+        this.logger.debug('Updated tool output message in place', { sessionKey, ts: existing.ts });
+      } catch (error) {
+        this.logger.warn('Failed to update tool output message', error);
+      }
+    } else {
+      // Create new message (first time)
+      const result = await this.app.client.chat.postMessage({
+        channel,
+        thread_ts: threadTs,
+        text: formattedOutput,
+        blocks,
+      });
+
+      if (result.ts) {
+        this.toolOutputMessages.set(sessionKey, {
+          ts: result.ts,
+          lastUpdated: new Date(),
+        });
+        this.logger.debug('Created new tool output message', { sessionKey, ts: result.ts });
+      }
     }
+
+    // Mark that tool output is now the latest (reset the flag)
+    this.textMessageAfterTool.set(sessionKey, false);
   }
 
   /**
@@ -159,6 +197,9 @@ export class MessageManager {
       thread_ts: threadTs,
       text: content,
     });
+
+    // Mark that text came after tool output (so next tool needs to bump)
+    this.textMessageAfterTool.set(sessionKey, true);
 
     this.logger.debug('Posted text message', { sessionKey });
   }
@@ -214,6 +255,7 @@ export class MessageManager {
     this.toolOutputMessages.delete(sessionKey);
     this.statusMessages.delete(sessionKey);
     this.accumulatedToolOutput.delete(sessionKey);
+    this.textMessageAfterTool.delete(sessionKey);
     this.logger.debug('Cleaned up messages for session', { sessionKey });
   }
 }
