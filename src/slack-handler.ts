@@ -316,9 +316,16 @@ export class SlackHandler {
             if (content) {
               currentMessages.push(content);
 
-              // Send each new piece of content as a separate message (interrupts tool window)
-              const formatted = this.formatMessage(content, false);
-              await this.messageManager.postTextMessage(sessionKey, formatted, channel, thread_ts || ts);
+              // Check if content is rich blocks JSON
+              const blocksMessage = this.tryParseRichBlocks(content);
+              if (blocksMessage) {
+                // Send as rich blocks message
+                await this.messageManager.postRichMessage(sessionKey, blocksMessage.text, blocksMessage.blocks, channel, thread_ts || ts);
+              } else {
+                // Send as regular formatted text (interrupts tool window)
+                const formatted = this.formatMessage(content, false);
+                await this.messageManager.postTextMessage(sessionKey, formatted, channel, thread_ts || ts);
+              }
             }
           }
         } else if (message.type === 'result') {
@@ -332,8 +339,15 @@ export class SlackHandler {
           if (message.subtype === 'success' && (message as any).result) {
             const finalResult = (message as any).result;
             if (finalResult && !currentMessages.includes(finalResult)) {
-              const formatted = this.formatMessage(finalResult, true);
-              await this.messageManager.postTextMessage(sessionKey, formatted, channel, thread_ts || ts);
+              // Check if final result is rich blocks JSON
+              const blocksMessage = this.tryParseRichBlocks(finalResult);
+              if (blocksMessage) {
+                // Send as rich blocks message
+                await this.messageManager.postRichMessage(sessionKey, blocksMessage.text, blocksMessage.blocks, channel, thread_ts || ts);
+              } else {
+                const formatted = this.formatMessage(finalResult, true);
+                await this.messageManager.postTextMessage(sessionKey, formatted, channel, thread_ts || ts);
+              }
             }
           }
         }
@@ -810,6 +824,34 @@ export class SlackHandler {
     } catch (error) {
       this.logger.error('Failed to handle channel join', error);
     }
+  }
+
+  /**
+   * Try to parse content as rich blocks JSON
+   * Format: ```slack-blocks\n{JSON}\n```
+   */
+  private tryParseRichBlocks(content: string): { text: string; blocks: any[] } | null {
+    // Look for special marker: ```slack-blocks ... ```
+    const match = content.match(/```slack-blocks\s*\n([\s\S]*?)```/);
+    if (!match) {
+      return null;
+    }
+
+    try {
+      const json = JSON.parse(match[1]);
+
+      // Validate structure
+      if (json && typeof json === 'object' && Array.isArray(json.blocks)) {
+        return {
+          text: json.text || 'Rich message',
+          blocks: json.blocks,
+        };
+      }
+    } catch (error) {
+      this.logger.warn('Failed to parse slack-blocks JSON', error);
+    }
+
+    return null;
   }
 
   private formatMessage(text: string, isFinal: boolean): string {

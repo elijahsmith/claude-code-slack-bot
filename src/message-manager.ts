@@ -205,6 +205,30 @@ export class MessageManager {
   }
 
   /**
+   * Post a rich message with custom Slack blocks (always creates new message)
+   */
+  async postRichMessage(
+    sessionKey: string,
+    text: string,
+    blocks: any[],
+    channel: string,
+    threadTs: string
+  ): Promise<void> {
+    // Always create new message with blocks
+    await this.app.client.chat.postMessage({
+      channel,
+      thread_ts: threadTs,
+      text,
+      blocks,
+    });
+
+    // Mark that text came after tool output (so next tool needs to bump)
+    this.textMessageAfterTool.set(sessionKey, true);
+
+    this.logger.debug('Posted rich blocks message', { sessionKey, blockCount: blocks.length });
+  }
+
+  /**
    * Update or create a status message
    * Always updates in place, never bumps
    */
