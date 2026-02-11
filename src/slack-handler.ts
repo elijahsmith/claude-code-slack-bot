@@ -7,6 +7,7 @@ import { FileHandler, ProcessedFile } from './file-handler.js';
 import { TodoManager, Todo } from './todo-manager.js';
 import { McpManager } from './mcp-manager.js';
 import { MessageManager } from './message-manager.js';
+import { RestartManager } from './restart-manager.js';
 import { config, isToolAllowed } from './config.js';
 
 const { App } = slackBolt;
@@ -57,6 +58,7 @@ export class SlackHandler {
     sessionKey: string;
   }> = new Map();
   private pendingToolDisplay: Map<string, string> = new Map(); // sessionKey -> pending tool display message
+  private restartManager: RestartManager;
 
   constructor(app: InstanceType<typeof App>, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
     this.app = app;
@@ -67,6 +69,7 @@ export class SlackHandler {
     this.fileHandler.setSlackClient(app.client);
     this.todoManager = new TodoManager();
     this.messageManager = new MessageManager(app);
+    this.restartManager = new RestartManager();
   }
 
   async handleMessage(event: MessageEvent, say: any) {
@@ -303,6 +306,24 @@ export class SlackHandler {
 
             if (todoTool) {
               await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, thread_ts || ts, say);
+            }
+
+            // Check for restart trigger (Bash: touch /control/restart.flag)
+            const bashTool = message.message.content?.find((part: any) =>
+              part.type === 'tool_use' &&
+              part.name === 'Bash' &&
+              part.input?.command?.includes('touch /control/restart.flag')
+            );
+
+            if (bashTool) {
+              this.restartManager.markRestart({
+                channel,
+                threadTs: thread_ts,
+                userId: event.user,
+                sessionKey,
+                timestamp: new Date().toISOString(),
+              });
+              this.logger.info('Marked session for restart notification', { sessionKey });
             }
 
             // Accumulate tool output (skip TodoWrite - handled separately)
@@ -996,6 +1017,22 @@ export class SlackHandler {
   }
 
   async sendStartupNotifications() {
+    // Check for pending restart session first
+    const restartSession = this.restartManager.getPendingRestart();
+    if (restartSession) {
+      try {
+        await this.app.client.chat.postMessage({
+          channel: restartSession.channel,
+          thread_ts: restartSession.threadTs,
+          text: '✅ Restart complete! I\'m back online and ready to continue.',
+        });
+        this.logger.info('Sent restart notification', { sessionKey: restartSession.sessionKey });
+      } catch (error) {
+        this.logger.error('Failed to send restart notification', error);
+      }
+    }
+
+    // Send regular startup notifications
     try {
       const configs = this.workingDirManager.listConfigurations();
       const channelConfigs = configs.filter(config => !config.threadTs && !config.userId);
