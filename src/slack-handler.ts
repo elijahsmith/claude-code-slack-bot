@@ -974,6 +974,20 @@ export class SlackHandler {
       }
     });
 
+    // Handle tool history toggle button clicks
+    this.app.action(/^toggle_tool_history_/, async ({ ack, body }: { ack: any; body: any }) => {
+      await ack();
+
+      const sessionKey = (body as any).actions[0].value;
+      this.logger.info('Toggle tool history button clicked', { sessionKey });
+
+      // Toggle the expansion state
+      this.messageManager.toggleToolHistory(sessionKey);
+
+      // Re-render the tool output with new state
+      await this.messageManager.rerenderToolOutput(sessionKey);
+    });
+
     // Cleanup inactive sessions periodically
     setInterval(() => {
       this.logger.debug('Running session cleanup');
