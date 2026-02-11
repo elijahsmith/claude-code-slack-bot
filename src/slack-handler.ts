@@ -6,6 +6,7 @@ import { WorkingDirectoryManager } from './working-directory-manager.js';
 import { FileHandler, ProcessedFile } from './file-handler.js';
 import { TodoManager, Todo } from './todo-manager.js';
 import { McpManager } from './mcp-manager.js';
+import { MessageManager } from './message-manager.js';
 import { config, isToolAllowed } from './config.js';
 
 const { App } = slackBolt;
@@ -41,7 +42,7 @@ export class SlackHandler {
   private fileHandler: FileHandler;
   private todoManager: TodoManager;
   private mcpManager: McpManager;
-  private todoMessages: Map<string, string> = new Map(); // sessionKey -> messageTs
+  private messageManager: MessageManager;
   private originalMessages: Map<string, { channel: string; ts: string }> = new Map(); // sessionKey -> original message info
   private currentReactions: Map<string, string> = new Map(); // sessionKey -> current emoji
   private botUserId: string | null = null;
@@ -55,9 +56,6 @@ export class SlackHandler {
     input: Record<string, unknown>;
     sessionKey: string;
   }> = new Map();
-  // Tool output tracking - accumulate all tool uses in a single updatable message
-  private toolMessages: Map<string, string> = new Map(); // sessionKey -> messageTs
-  private accumulatedToolOutput: Map<string, string[]> = new Map(); // sessionKey -> array of tool outputs
   private pendingToolDisplay: Map<string, string> = new Map(); // sessionKey -> pending tool display message
 
   constructor(app: InstanceType<typeof App>, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
@@ -68,6 +66,7 @@ export class SlackHandler {
     this.fileHandler = new FileHandler();
     this.fileHandler.setSlackClient(app.client);
     this.todoManager = new TodoManager();
+    this.messageManager = new MessageManager(app);
   }
 
   async handleMessage(event: MessageEvent, say: any) {
@@ -248,7 +247,6 @@ export class SlackHandler {
     }
 
     let currentMessages: string[] = [];
-    let statusMessageTs: string | undefined;
 
     try {
       // Get user display name for context
@@ -270,11 +268,7 @@ export class SlackHandler {
       });
 
       // Send initial status message
-      const statusResult = await say({
-        text: '🤔 *Thinking...*',
-        thread_ts: thread_ts || ts,
-      });
-      statusMessageTs = statusResult.ts;
+      await this.messageManager.updateStatus(sessionKey, '🤔 *Thinking...*', channel, thread_ts || ts);
 
       // Add thinking reaction to original message (but don't spam if already set)
       await this.updateMessageReaction(sessionKey, '🤔');
@@ -297,13 +291,7 @@ export class SlackHandler {
 
           if (hasToolUse) {
             // Update status to show working
-            if (statusMessageTs) {
-              await this.app.client.chat.update({
-                channel,
-                ts: statusMessageTs,
-                text: '⚙️ *Working...*',
-              });
-            }
+            await this.messageManager.updateStatus(sessionKey, '⚙️ *Working...*', channel, thread_ts || ts);
 
             // Update reaction to show working
             await this.updateMessageReaction(sessionKey, '⚙️');
@@ -317,10 +305,10 @@ export class SlackHandler {
               await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, thread_ts || ts, say);
             }
 
-            // Accumulate tool output
+            // Accumulate tool output (skip TodoWrite - handled separately)
             const toolContent = this.formatToolUse(message.message.content);
             if (toolContent) {
-              await this.accumulateAndDisplayToolOutput(sessionKey, toolContent, channel, thread_ts || ts, say);
+              await this.messageManager.updateToolOutput(sessionKey, toolContent, channel, thread_ts || ts);
             }
           } else {
             // Handle regular text content - this gets its own message
@@ -328,12 +316,9 @@ export class SlackHandler {
             if (content) {
               currentMessages.push(content);
 
-              // Send each new piece of content as a separate message
+              // Send each new piece of content as a separate message (interrupts tool window)
               const formatted = this.formatMessage(content, false);
-              await say({
-                text: formatted,
-                thread_ts: thread_ts || ts,
-              });
+              await this.messageManager.postTextMessage(sessionKey, formatted, channel, thread_ts || ts);
             }
           }
         } else if (message.type === 'result') {
@@ -348,23 +333,14 @@ export class SlackHandler {
             const finalResult = (message as any).result;
             if (finalResult && !currentMessages.includes(finalResult)) {
               const formatted = this.formatMessage(finalResult, true);
-              await say({
-                text: formatted,
-                thread_ts: thread_ts || ts,
-              });
+              await this.messageManager.postTextMessage(sessionKey, formatted, channel, thread_ts || ts);
             }
           }
         }
       }
 
       // Update status to completed
-      if (statusMessageTs) {
-        await this.app.client.chat.update({
-          channel,
-          ts: statusMessageTs,
-          text: '✅ *Task completed*',
-        });
-      }
+      await this.messageManager.updateStatus(sessionKey, '✅ *Task completed*', channel, thread_ts || ts);
 
       // Update reaction to show completion
       await this.updateMessageReaction(sessionKey, '✅');
@@ -381,34 +357,24 @@ export class SlackHandler {
     } catch (error: any) {
       if (error.name !== 'AbortError') {
         this.logger.error('Error handling message', error);
-        
+
         // Update status to error
-        if (statusMessageTs) {
-          await this.app.client.chat.update({
-            channel,
-            ts: statusMessageTs,
-            text: '❌ *Error occurred*',
-          });
-        }
+        await this.messageManager.updateStatus(sessionKey, '❌ *Error occurred*', channel, thread_ts || ts);
 
         // Update reaction to show error
         await this.updateMessageReaction(sessionKey, '❌');
 
-        await say({
-          text: `Error: ${error.message || 'Something went wrong'}`,
-          thread_ts: thread_ts || ts,
-        });
+        await this.messageManager.postTextMessage(
+          sessionKey,
+          `Error: ${error.message || 'Something went wrong'}`,
+          channel,
+          thread_ts || ts
+        );
       } else {
         this.logger.debug('Request was aborted', { sessionKey });
 
         // Update status to cancelled
-        if (statusMessageTs) {
-          await this.app.client.chat.update({
-            channel,
-            ts: statusMessageTs,
-            text: '⏹️ *Cancelled*',
-          });
-        }
+        await this.messageManager.updateStatus(sessionKey, '⏹️ *Cancelled*', channel, thread_ts || ts);
 
         // Update reaction to show cancellation
         await this.updateMessageReaction(sessionKey, '⏹️');
@@ -420,17 +386,15 @@ export class SlackHandler {
       }
     } finally {
       this.activeControllers.delete(sessionKey);
-      
-      // Clean up todo tracking and tool messages if session ended
+
+      // Clean up tracking if session ended
       if (session?.sessionId) {
-        // Don't immediately clean up - keep todos visible for a while
+        // Don't immediately clean up - keep messages visible for a while
         setTimeout(() => {
           this.todoManager.cleanupSession(session.sessionId!);
-          this.todoMessages.delete(sessionKey);
+          this.messageManager.cleanup(sessionKey);
           this.originalMessages.delete(sessionKey);
           this.currentReactions.delete(sessionKey);
-          this.toolMessages.delete(sessionKey);
-          this.accumulatedToolOutput.delete(sessionKey);
         }, 5 * 60 * 1000); // 5 minutes
       }
     }
@@ -485,36 +449,37 @@ export class SlackHandler {
   private formatEditTool(toolName: string, input: any): string {
     const filePath = input.file_path;
     const edits = toolName === 'MultiEdit' ? input.edits : [{ old_string: input.old_string, new_string: input.new_string }];
-    
-    let result = `📝 *Editing \`${filePath}\`*\n`;
-    
+
+    let result = `📝 Editing ${filePath}`;
+
     for (const edit of edits) {
-      result += '\n```diff\n';
-      result += `- ${this.truncateString(edit.old_string, 200)}\n`;
-      result += `+ ${this.truncateString(edit.new_string, 200)}\n`;
-      result += '```';
+      const oldPreview = this.truncateString(edit.old_string, 100);
+      const newPreview = this.truncateString(edit.new_string, 100);
+      result += `\n  - ${oldPreview}`;
+      result += `\n  + ${newPreview}`;
     }
-    
+
     return result;
   }
 
   private formatWriteTool(input: any): string {
     const filePath = input.file_path;
-    const preview = this.truncateString(input.content, 300);
-    
-    return `📄 *Creating \`${filePath}\`*\n\`\`\`\n${preview}\n\`\`\``;
+    const preview = this.truncateString(input.content, 200);
+
+    return `📄 Creating ${filePath}\n  ${preview}`;
   }
 
   private formatReadTool(input: any): string {
-    return `👁️ *Reading \`${input.file_path}\`*`;
+    return `👁️ Reading ${input.file_path}`;
   }
 
   private formatBashTool(input: any): string {
-    return `🖥️ *Running command:*\n\`\`\`bash\n${input.command}\n\`\`\``;
+    const command = this.truncateString(input.command, 200);
+    return `🖥️ Running: ${command}`;
   }
 
   private formatGenericTool(toolName: string, input: any): string {
-    return `🔧 *Using ${toolName}*`;
+    return `🔧 Using ${toolName}`;
   }
 
   private truncateString(str: string, maxLength: number): string {
@@ -529,11 +494,11 @@ export class SlackHandler {
   }
 
   private async handleTodoUpdate(
-    input: any, 
-    sessionKey: string, 
-    sessionId: string | undefined, 
-    channel: string, 
-    threadTs: string, 
+    input: any,
+    sessionKey: string,
+    sessionId: string | undefined,
+    channel: string,
+    threadTs: string,
     say: any
   ): Promise<void> {
     if (!sessionId || !input.todos) {
@@ -542,124 +507,29 @@ export class SlackHandler {
 
     const newTodos: Todo[] = input.todos;
     const oldTodos = this.todoManager.getTodos(sessionId);
-    
+
     // Check if there's a significant change
     if (this.todoManager.hasSignificantChange(oldTodos, newTodos)) {
+      // Determine if we should bump
+      const shouldBump = this.todoManager.shouldBumpTaskList(oldTodos, newTodos);
+
+      // Get recent change description
+      const recentChange = this.todoManager.getRecentChangeDescription(oldTodos, newTodos);
+
       // Update the todo manager
       this.todoManager.updateTodos(sessionId, newTodos);
-      
-      // Format the todo list
-      const todoList = this.todoManager.formatTodoList(newTodos);
-      
-      // Check if we already have a todo message for this session
-      const existingTodoMessageTs = this.todoMessages.get(sessionKey);
-      
-      if (existingTodoMessageTs) {
-        // Update existing todo message
-        try {
-          await this.app.client.chat.update({
-            channel,
-            ts: existingTodoMessageTs,
-            text: todoList,
-          });
-          this.logger.debug('Updated existing todo message', { sessionKey, messageTs: existingTodoMessageTs });
-        } catch (error) {
-          this.logger.warn('Failed to update todo message, creating new one', error);
-          // If update fails, create a new message
-          await this.createNewTodoMessage(todoList, channel, threadTs, sessionKey, say);
-        }
-      } else {
-        // Create new todo message
-        await this.createNewTodoMessage(todoList, channel, threadTs, sessionKey, say);
-      }
 
-      // Send status change notification if there are meaningful changes
-      const statusChange = this.todoManager.getStatusChange(oldTodos, newTodos);
-      if (statusChange) {
-        await say({
-          text: `🔄 *Task Update:*\n${statusChange}`,
-          thread_ts: threadTs,
-        });
-      }
+      // Format the todo list with timestamp and change info
+      const todoList = this.todoManager.formatTodoList(newTodos, sessionId, recentChange || undefined);
+
+      // Update task list using MessageManager
+      await this.messageManager.updateTaskList(sessionKey, todoList, channel, threadTs, shouldBump);
 
       // Update reaction based on overall progress
       await this.updateTaskProgressReaction(sessionKey, newTodos);
     }
   }
 
-  private async createNewTodoMessage(
-    todoList: string,
-    channel: string,
-    threadTs: string,
-    sessionKey: string,
-    say: any
-  ): Promise<void> {
-    const result = await say({
-      text: todoList,
-      thread_ts: threadTs,
-    });
-
-    if (result?.ts) {
-      this.todoMessages.set(sessionKey, result.ts);
-      this.logger.debug('Created new todo message', { sessionKey, messageTs: result.ts });
-    }
-  }
-
-  private async accumulateAndDisplayToolOutput(
-    sessionKey: string,
-    toolContent: string,
-    channel: string,
-    threadTs: string,
-    say: any
-  ): Promise<void> {
-    // Get or initialize accumulated tool output array
-    let accumulated = this.accumulatedToolOutput.get(sessionKey) || [];
-    accumulated.push(toolContent);
-    this.accumulatedToolOutput.set(sessionKey, accumulated);
-
-    // Format all tool output as a single code block
-    const formattedOutput = '```\n' + accumulated.join('\n\n---\n\n') + '\n```';
-
-    // Check if we already have a tool message for this session
-    const existingToolMessageTs = this.toolMessages.get(sessionKey);
-
-    if (existingToolMessageTs) {
-      // Update existing tool message
-      try {
-        await this.app.client.chat.update({
-          channel,
-          ts: existingToolMessageTs,
-          text: formattedOutput,
-        });
-        this.logger.debug('Updated existing tool message', { sessionKey, messageTs: existingToolMessageTs });
-      } catch (error) {
-        this.logger.warn('Failed to update tool message, creating new one', error);
-        // If update fails, create a new message
-        await this.createNewToolMessage(formattedOutput, channel, threadTs, sessionKey, say);
-      }
-    } else {
-      // Create new tool message
-      await this.createNewToolMessage(formattedOutput, channel, threadTs, sessionKey, say);
-    }
-  }
-
-  private async createNewToolMessage(
-    toolOutput: string,
-    channel: string,
-    threadTs: string,
-    sessionKey: string,
-    say: any
-  ): Promise<void> {
-    const result = await say({
-      text: toolOutput,
-      thread_ts: threadTs,
-    });
-
-    if (result?.ts) {
-      this.toolMessages.set(sessionKey, result.ts);
-      this.logger.debug('Created new tool message', { sessionKey, messageTs: result.ts });
-    }
-  }
 
   // Create a permission handler for Slack-based tool approval
   private createPermissionHandler(channel: string, threadTs: string, user: string, sessionKey: string): PermissionHandler {

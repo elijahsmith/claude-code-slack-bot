@@ -7,14 +7,23 @@ export interface Todo {
   priority: 'high' | 'medium' | 'low';
 }
 
+export interface TodoChange {
+  type: 'added' | 'status_changed' | 'removed';
+  content: string;
+  newStatus?: 'pending' | 'in_progress' | 'completed';
+  timestamp: Date;
+}
+
 export class TodoManager {
   private logger = new Logger('TodoManager');
   private todos: Map<string, Todo[]> = new Map(); // sessionId -> todos
+  private lastUpdate: Map<string, Date> = new Map(); // sessionId -> last update time
 
   updateTodos(sessionId: string, todos: Todo[]): void {
     this.todos.set(sessionId, todos);
-    this.logger.debug('Updated todos for session', { 
-      sessionId, 
+    this.lastUpdate.set(sessionId, new Date());
+    this.logger.debug('Updated todos for session', {
+      sessionId,
       todoCount: todos.length,
       pending: todos.filter(t => t.status === 'pending').length,
       inProgress: todos.filter(t => t.status === 'in_progress').length,
@@ -26,13 +35,13 @@ export class TodoManager {
     return this.todos.get(sessionId) || [];
   }
 
-  formatTodoList(todos: Todo[]): string {
+  formatTodoList(todos: Todo[], sessionId?: string, recentChange?: string): string {
     if (todos.length === 0) {
       return '📋 *Task List*\n\nNo tasks defined yet.';
     }
 
     let message = '📋 *Task List*\n\n';
-    
+
     // Group by status
     const pending = todos.filter(t => t.status === 'pending');
     const inProgress = todos.filter(t => t.status === 'in_progress');
@@ -71,10 +80,42 @@ export class TodoManager {
     const total = todos.length;
     const completedCount = completed.length;
     const progress = total > 0 ? Math.round((completedCount / total) * 100) : 0;
-    
+
     message += `\n*Progress:* ${completedCount}/${total} tasks completed (${progress}%)`;
 
+    // Add timestamp and recent change if available
+    if (sessionId) {
+      const lastUpdate = this.lastUpdate.get(sessionId);
+      if (lastUpdate) {
+        const timeAgo = this.formatTimeAgo(lastUpdate);
+        message += `\n\n_Updated ${timeAgo}`;
+        if (recentChange) {
+          message += ` • ${recentChange}`;
+        }
+        message += '_';
+      }
+    }
+
     return message;
+  }
+
+  /**
+   * Format time ago string (e.g., "just now", "2m ago", "1h ago")
+   */
+  private formatTimeAgo(date: Date): string {
+    const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+
+    if (seconds < 10) return 'just now';
+    if (seconds < 60) return `${seconds}s ago`;
+
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
   }
 
   private getPriorityIcon(priority: string): string {
@@ -139,8 +180,63 @@ export class TodoManager {
     return changes.length > 0 ? changes.join('\n') : null;
   }
 
+  /**
+   * Get a human-readable description of the most recent change
+   */
+  getRecentChangeDescription(oldTodos: Todo[], newTodos: Todo[]): string | null {
+    // Find the most significant recent change
+    for (const newTodo of newTodos) {
+      const oldTodo = oldTodos.find(t => t.id === newTodo.id);
+
+      if (!oldTodo) {
+        return `Added: ${newTodo.content}`;
+      } else if (oldTodo.status !== newTodo.status) {
+        if (newTodo.status === 'completed') {
+          return `Completed: ${newTodo.content}`;
+        } else if (newTodo.status === 'in_progress') {
+          return `Started: ${newTodo.content}`;
+        }
+      }
+    }
+
+    // Check for removed tasks
+    for (const oldTodo of oldTodos) {
+      if (!newTodos.find(t => t.id === oldTodo.id)) {
+        return `Removed: ${oldTodo.content}`;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Determine if a change is significant enough to bump the task list
+   */
+  shouldBumpTaskList(oldTodos: Todo[], newTodos: Todo[]): boolean {
+    // Check if any task status changed
+    for (const newTodo of newTodos) {
+      const oldTodo = oldTodos.find(t => t.id === newTodo.id);
+
+      if (!oldTodo) {
+        // New task added
+        return true;
+      } else if (oldTodo.status !== newTodo.status) {
+        // Status changed
+        return true;
+      }
+    }
+
+    // Check if any task was removed
+    if (oldTodos.length !== newTodos.length) {
+      return true;
+    }
+
+    return false;
+  }
+
   cleanupSession(sessionId: string): void {
     this.todos.delete(sessionId);
+    this.lastUpdate.delete(sessionId);
     this.logger.debug('Cleaned up todos for session', { sessionId });
   }
 }
