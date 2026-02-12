@@ -101,21 +101,22 @@ export class ClaudeHandler {
       // Docker container is the security boundary - cwd is just context for Claude
     }
 
-    // Add MCP server configuration if available
-    const mcpServers = this.mcpManager.getServerConfiguration();
+    // Add MCP server configuration if available (filtered by working directory)
+    const mcpServers = this.mcpManager.getServerConfigurationForCwd(workingDirectory);
 
     if (mcpServers && Object.keys(mcpServers).length > 0) {
       options.mcpServers = mcpServers;
     }
 
     if (options.mcpServers && Object.keys(options.mcpServers).length > 0) {
-      // Allow all MCP tools by default
-      const defaultMcpTools = this.mcpManager.getDefaultAllowedTools();
+      // Allow all MCP tools from the filtered servers
+      const defaultMcpTools = this.mcpManager.getDefaultAllowedToolsForCwd(workingDirectory);
       if (defaultMcpTools.length > 0) {
         options.allowedTools = defaultMcpTools;
       }
-      
+
       this.logger.debug('Added MCP configuration to options', {
+        cwd: workingDirectory,
         serverCount: Object.keys(options.mcpServers).length,
         servers: Object.keys(options.mcpServers),
         allowedTools: defaultMcpTools,

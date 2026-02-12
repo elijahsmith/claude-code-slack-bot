@@ -159,26 +159,31 @@ export class SlackHandler {
       return;
     }
 
-    // Check if this is an MCP info command (only if there's text)
-    if (text && this.isMcpInfoCommand(text)) {
-      await say({
-        text: this.mcpManager.formatMcpInfo(),
-        thread_ts: thread_ts || ts,
-      });
-      return;
-    }
+    // Check if this is an MCP info or reload command (only if there's text)
+    if (text && (this.isMcpInfoCommand(text) || this.isMcpReloadCommand(text))) {
+      const isDMForMcp = channel.startsWith('D');
+      const mcpCwd = this.workingDirManager.getWorkingDirectory(
+        channel,
+        thread_ts,
+        isDMForMcp ? user : undefined
+      );
 
-    // Check if this is an MCP reload command (only if there's text)
-    if (text && this.isMcpReloadCommand(text)) {
-      const reloaded = this.mcpManager.reloadConfiguration();
-      if (reloaded) {
-        await say({
-          text: `✅ MCP configuration reloaded successfully.\n\n${this.mcpManager.formatMcpInfo()}`,
-          thread_ts: thread_ts || ts,
-        });
+      if (this.isMcpReloadCommand(text)) {
+        const reloaded = this.mcpManager.reloadConfiguration();
+        if (reloaded) {
+          await say({
+            text: `✅ MCP configuration reloaded successfully.\n\n${this.mcpManager.formatMcpInfo(mcpCwd)}`,
+            thread_ts: thread_ts || ts,
+          });
+        } else {
+          await say({
+            text: `❌ Failed to reload MCP configuration. Check the mcp-servers.json file.`,
+            thread_ts: thread_ts || ts,
+          });
+        }
       } else {
         await say({
-          text: `❌ Failed to reload MCP configuration. Check the mcp-servers.json file.`,
+          text: this.mcpManager.formatMcpInfo(mcpCwd),
           thread_ts: thread_ts || ts,
         });
       }
@@ -471,7 +476,7 @@ export class SlackHandler {
             break;
           case 'TodoWrite':
             // Handle TodoWrite separately - don't include in regular tool output
-            return this.handleTodoWrite(input);
+            continue;
           default:
             parts.push(this.formatGenericTool(toolName, input));
         }
@@ -521,11 +526,6 @@ export class SlackHandler {
     if (!str) return '';
     if (str.length <= maxLength) return str;
     return str.substring(0, maxLength) + '...';
-  }
-
-  private handleTodoWrite(input: any): string {
-    // TodoWrite tool doesn't produce visible output - handled separately
-    return '';
   }
 
   private async handleTodoUpdate(

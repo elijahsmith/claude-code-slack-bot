@@ -2,20 +2,24 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Logger } from './logger.js';
 
-export type McpStdioServerConfig = {
+type McpServerBase = {
+  allowedWorkingDirs?: string[];
+};
+
+export type McpStdioServerConfig = McpServerBase & {
   type?: 'stdio'; // Optional for backwards compatibility
   command: string;
   args?: string[];
   env?: Record<string, string>;
 };
 
-export type McpSSEServerConfig = {
+export type McpSSEServerConfig = McpServerBase & {
   type: 'sse';
   url: string;
   headers?: Record<string, string>;
 };
 
-export type McpHttpServerConfig = {
+export type McpHttpServerConfig = McpServerBase & {
   type: 'http';
   url: string;
   headers?: Record<string, string>;
@@ -111,6 +115,39 @@ export class McpManager {
     return config?.mcpServers;
   }
 
+  getServerConfigurationForCwd(cwd?: string): Record<string, McpServerConfig> | undefined {
+    const config = this.loadConfiguration();
+    if (!config) return undefined;
+
+    if (!cwd) return config.mcpServers;
+
+    const filtered: Record<string, McpServerConfig> = {};
+    for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
+      if (this.isServerAllowedForCwd(serverConfig, cwd)) {
+        filtered[name] = serverConfig;
+      }
+    }
+
+    this.logger.debug('Filtered MCP servers for cwd', {
+      cwd,
+      total: Object.keys(config.mcpServers).length,
+      allowed: Object.keys(filtered),
+    });
+
+    return Object.keys(filtered).length > 0 ? filtered : undefined;
+  }
+
+  private isServerAllowedForCwd(serverConfig: McpServerConfig, cwd: string): boolean {
+    if (!serverConfig.allowedWorkingDirs || serverConfig.allowedWorkingDirs.length === 0) {
+      return true; // No restriction → available everywhere
+    }
+    const normalizedCwd = cwd.replace(/\/+$/, '');
+    return serverConfig.allowedWorkingDirs.some(dir => {
+      const normalizedDir = dir.replace(/\/+$/, '');
+      return normalizedCwd === normalizedDir || normalizedCwd.startsWith(normalizedDir + '/');
+    });
+  }
+
   getDefaultAllowedTools(): string[] {
     const config = this.loadConfiguration();
     if (!config) {
@@ -121,18 +158,28 @@ export class McpManager {
     return Object.keys(config.mcpServers).map(serverName => `mcp__${serverName}`);
   }
 
-  formatMcpInfo(): string {
-    const config = this.loadConfiguration();
-    if (!config || Object.keys(config.mcpServers).length === 0) {
-      return 'No MCP servers configured.';
+  getDefaultAllowedToolsForCwd(cwd?: string): string[] {
+    const servers = this.getServerConfigurationForCwd(cwd);
+    if (!servers) return [];
+    return Object.keys(servers).map(serverName => `mcp__${serverName}`);
+  }
+
+  formatMcpInfo(cwd?: string): string {
+    const servers = cwd ? this.getServerConfigurationForCwd(cwd) : this.getServerConfiguration();
+    if (!servers || Object.keys(servers).length === 0) {
+      return cwd
+        ? `No MCP servers available for \`${cwd}\`.`
+        : 'No MCP servers configured.';
     }
 
-    let info = '🔧 **MCP Servers Configured:**\n\n';
-    
-    for (const [serverName, serverConfig] of Object.entries(config.mcpServers)) {
+    let info = cwd
+      ? `🔧 *MCP Servers for* \`${cwd}\`:\n\n`
+      : '🔧 *MCP Servers Configured:*\n\n';
+
+    for (const [serverName, serverConfig] of Object.entries(servers)) {
       const type = serverConfig.type || 'stdio';
-      info += `• **${serverName}** (${type})\n`;
-      
+      info += `• *${serverName}* (${type})\n`;
+
       if (type === 'stdio') {
         const stdioConfig = serverConfig as McpStdioServerConfig;
         info += `  Command: \`${stdioConfig.command}\`\n`;
@@ -147,7 +194,7 @@ export class McpManager {
     }
 
     info += 'Available tools follow the pattern: `mcp__serverName__toolName`\n';
-    info += 'All MCP tools are allowed by default.';
+    info += 'All listed MCP tools are allowed by default.';
 
     return info;
   }

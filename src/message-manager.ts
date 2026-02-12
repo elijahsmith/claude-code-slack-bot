@@ -6,9 +6,39 @@ const { App } = slackBolt;
 /**
  * Manages different types of messages in Slack conversations
  * - Task List: Single persistent message, updates in place
- * - Tool Output: Simple code block that Slack auto-collapses with "see more"
+ * - Tool Output: Rich expandable view with "Show More" toggle (see detailed docs below)
  * - Status: Single message that updates in place
  * - Text: Regular messages that always create new messages
+ *
+ * TOOL OUTPUT DISPLAY SYSTEM:
+ * ---------------------------
+ * Tool output uses an intelligent expandable display that keeps the conversation clean
+ * while providing full details on demand.
+ *
+ * Behavior:
+ * 1. Shows the most recent 3 tool calls by default (e.g., "📝 Editing file.ts")
+ * 2. When there are >3 calls, older calls are collapsed with a "Show X More" button
+ * 3. Button appears left-aligned via actions block
+ * 4. Expansion state is sticky - persists across updates until text interrupts
+ * 5. When text message comes after tools, creates fresh tool output message
+ *
+ * Display States:
+ * - COLLAPSED (default): Shows [Show X More Tool Calls] button only
+ * - EXPANDED: Shows all older calls with [Hide Older Calls] button below them
+ * - Recent calls (last 3) are ALWAYS visible regardless of state
+ *
+ * User Interaction:
+ * - Click "Show X More Tool Calls" → Expands to show all older calls
+ * - Click "Hide Older Calls" → Collapses back to summary
+ * - State persists: if expanded, new tools keep the expanded view
+ * - Text interruption resets: new tool message starts collapsed
+ *
+ * Technical Details:
+ * - Uses Slack Block Kit with section blocks for clean formatting
+ * - No code block wrapping - shows formatted emoji tool descriptions directly
+ * - Button action_id: 'toggle_tool_history' (handled in slack-handler.ts)
+ * - Session key passed via button value for state management
+ * - Expansion state tracked in toolOutputExpanded Map
  */
 
 export interface MessageWindow {
@@ -115,8 +145,11 @@ export class MessageManager {
       this.toolOutputExpanded.delete(sessionKey); // Reset expansion state
     }
 
+    // Read back from the map to get the correct reference (may have been reset by bump)
+    const currentAccumulated = this.accumulatedToolOutput.get(sessionKey) || [];
+
     // Build blocks with smart expansion
-    const { text, blocks } = this.buildToolOutputBlocks(sessionKey, accumulated);
+    const { text, blocks } = this.buildToolOutputBlocks(sessionKey, currentAccumulated);
 
     if (existing && !shouldBump) {
       // Update in place (tool is already at bottom)
@@ -214,22 +247,20 @@ export class MessageManager {
         ],
       });
     } else {
-      // Show summary with button on same line using section with accessory
+      // Show button only, left-aligned via actions block
       blocks.push({
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `_${older.length} earlier tool calls_`,
-        },
-        accessory: {
-          type: 'button',
-          text: {
-            type: 'plain_text',
-            text: 'Show All Calls',
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: {
+              type: 'plain_text',
+              text: `Show ${older.length} More Tool Calls`,
+            },
+            action_id: 'toggle_tool_history',
+            value: sessionKey,
           },
-          action_id: 'toggle_tool_history',
-          value: sessionKey,
-        },
+        ],
       });
     }
 
