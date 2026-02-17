@@ -255,14 +255,32 @@ export class ClaudeHandler {
             session.sessionId = message.session_id;
             session.lastActivity = new Date();
 
+            const initMsg = message as any;
+
+            // Capture init info for debug diagnostics
+            session.lastInitInfo = {
+              model: initMsg.model,
+              tools: initMsg.tools || [],
+              skills: initMsg.skills || [],
+              slashCommands: initMsg.slash_commands || [],
+              plugins: initMsg.plugins || [],
+              mcpServers: initMsg.mcp_servers || [],
+              permissionMode: initMsg.permissionMode,
+              claudeCodeVersion: initMsg.claude_code_version,
+              timestamp: new Date(),
+            };
+
             // Persist updated session with sessionId
             const sessionKey = this.getSessionKey(session.userId, session.channelId, session.threadTs);
             storage.saveSession(sessionKey, session.userId, session.channelId, session.threadTs, session.sessionId);
 
             this.logger.info('Session initialized', {
               sessionId: message.session_id,
-              model: (message as any).model,
-              tools: (message as any).tools?.length || 0,
+              model: initMsg.model,
+              tools: initMsg.tools?.length || 0,
+              skills: initMsg.skills || [],
+              slashCommands: initMsg.slash_commands || [],
+              plugins: initMsg.plugins || [],
             });
           }
         }
@@ -308,5 +326,106 @@ export class ClaudeHandler {
     if (cleaned > 0) {
       this.logger.info(`Cleaned up ${cleaned} inactive sessions`);
     }
+  }
+
+  /**
+   * Build debug diagnostics for a given context (channel/thread/user).
+   * Returns a formatted string suitable for posting to Slack.
+   */
+  getDebugInfo(channelId: string, threadTs?: string, userId?: string, workingDirectory?: string): string {
+    const sessionKey = userId ? this.getSessionKey(userId, channelId, threadTs) : undefined;
+    const session = sessionKey ? this.sessions.get(sessionKey) : undefined;
+
+    const lines: string[] = [];
+    lines.push('🔍 *Debug Info*\n');
+
+    // Working directory
+    lines.push(`*Working Directory:* \`${workingDirectory || '(not set)'}\``);
+
+    // Check for .claude/skills in the working directory
+    if (workingDirectory) {
+      const skillsDir = path.join(workingDirectory, '.claude', 'skills');
+      const skillsDirExists = fs.existsSync(skillsDir);
+      lines.push(`*Skills Directory:* \`${skillsDir}\` ${skillsDirExists ? '✅ exists' : '❌ not found'}`);
+
+      if (skillsDirExists) {
+        try {
+          const skillEntries = fs.readdirSync(skillsDir, { withFileTypes: true });
+          const skillNames = skillEntries
+            .filter(e => e.isDirectory())
+            .map(e => e.name);
+          lines.push(`*Skills on disk:* ${skillNames.length > 0 ? skillNames.map(s => `\`${s}\``).join(', ') : '(none)'}`);
+        } catch {
+          lines.push(`*Skills on disk:* ⚠️ could not read directory`);
+        }
+      }
+
+      // Check for CLAUDE.md
+      const claudeMd = path.join(workingDirectory, 'CLAUDE.md');
+      const claudeMdExists = fs.existsSync(claudeMd);
+      lines.push(`*CLAUDE.md:* \`${claudeMd}\` ${claudeMdExists ? '✅ exists' : '❌ not found'}`);
+    }
+
+    // Session info
+    lines.push('');
+    if (session) {
+      lines.push(`*Session Key:* \`${sessionKey}\``);
+      lines.push(`*Session ID:* \`${session.sessionId || '(none - new session)'}\``);
+      lines.push(`*Last Activity:* ${session.lastActivity.toISOString()}`);
+
+      // Last init info from SDK
+      if (session.lastInitInfo) {
+        const info = session.lastInitInfo;
+        lines.push('');
+        lines.push('*Last SDK Init:*');
+        lines.push(`  Model: \`${info.model || 'unknown'}\``);
+        lines.push(`  Claude Code Version: \`${info.claudeCodeVersion || 'unknown'}\``);
+        lines.push(`  Permission Mode: \`${info.permissionMode || 'unknown'}\``);
+        lines.push(`  Tools: ${info.tools?.length || 0}`);
+        lines.push(`  Skills: ${info.skills?.length ? info.skills.map(s => `\`${s}\``).join(', ') : '(none)'}`);
+        lines.push(`  Slash Commands: ${info.slashCommands?.length ? info.slashCommands.map(s => `\`${s}\``).join(', ') : '(none)'}`);
+        lines.push(`  MCP Servers: ${info.mcpServers?.length ? info.mcpServers.map(s => `\`${s.name}\` (${s.status})`).join(', ') : '(none)'}`);
+        lines.push(`  Plugins: ${info.plugins?.length ? info.plugins.map(p => `\`${p.name}\``).join(', ') : '(none)'}`);
+        lines.push(`  Init Time: ${info.timestamp.toISOString()}`);
+      } else {
+        lines.push('*Last SDK Init:* (no session started yet)');
+      }
+    } else {
+      lines.push(`*Session:* (no active session for this context)`);
+    }
+
+    // System prompt info
+    lines.push('');
+    lines.push(`*System Prompt:* ${config.systemPrompt ? `${config.systemPrompt.length} chars` : '(none)'}`);
+
+    // MCP servers for this cwd
+    const mcpServers = this.mcpManager.getServerConfigurationForCwd(workingDirectory);
+    if (mcpServers && Object.keys(mcpServers).length > 0) {
+      lines.push(`*MCP Servers (for cwd):* ${Object.keys(mcpServers).map(s => `\`${s}\``).join(', ')}`);
+    } else {
+      lines.push(`*MCP Servers (for cwd):* (none)`);
+    }
+
+    // SDK session data directory
+    const homeDir = os.homedir();
+    const claudeDir = path.join(homeDir, '.claude');
+    const projectsDir = path.join(claudeDir, 'projects');
+    lines.push('');
+    lines.push(`*SDK Home:* \`${claudeDir}\` ${fs.existsSync(claudeDir) ? '✅' : '❌'}`);
+    lines.push(`*SDK Projects:* \`${projectsDir}\` ${fs.existsSync(projectsDir) ? '✅' : '❌'}`);
+    if (fs.existsSync(projectsDir)) {
+      try {
+        const projects = fs.readdirSync(projectsDir);
+        lines.push(`*SDK Project Dirs:* ${projects.length > 0 ? projects.map(p => `\`${p}\``).join(', ') : '(empty)'}`);
+      } catch {
+        lines.push(`*SDK Project Dirs:* ⚠️ could not read`);
+      }
+    }
+
+    // Setting sources
+    lines.push('');
+    lines.push(`*Setting Sources:* \`["project", "local"]\``);
+
+    return lines.join('\n');
   }
 }

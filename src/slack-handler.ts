@@ -151,9 +151,14 @@ export class SlackHandler {
         isDM ? user : undefined
       );
       const context = thread_ts ? 'this thread' : (isDM ? 'this conversation' : 'this channel');
-      
+
+      let response = this.workingDirManager.formatDirectoryMessage(directory, context);
+
+      // Append debug diagnostics
+      response += '\n\n' + this.claudeHandler.getDebugInfo(channel, thread_ts, user, directory);
+
       await say({
-        text: this.workingDirManager.formatDirectoryMessage(directory, context),
+        text: response,
         thread_ts: thread_ts || ts,
       });
       return;
