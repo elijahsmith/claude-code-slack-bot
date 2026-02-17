@@ -321,14 +321,29 @@ export class SlackHandler {
             );
 
             if (bashTool) {
+              // Try to extract reason from tool description or surrounding text content
+              let reason = 'Self-initiated restart';
+              const textContent = message.message.content
+                ?.filter((part: any) => part.type === 'text')
+                .map((part: any) => part.text)
+                .join(' ');
+
+              // Look for description or description text in the bash tool
+              if (bashTool.input?.description) {
+                reason = bashTool.input.description;
+              } else if (textContent && textContent.length > 0 && textContent.length < 200) {
+                // Use surrounding text as context if it's short enough
+                reason = textContent.trim();
+              }
+
               this.restartManager.markRestart({
                 channel,
                 threadTs: thread_ts,
                 userId: event.user,
                 sessionKey,
                 timestamp: new Date().toISOString(),
-              });
-              this.logger.info('Marked session for restart notification', { sessionKey });
+              }, reason);
+              this.logger.info('Marked session for restart notification', { sessionKey, reason });
             }
 
             // Accumulate tool output (skip TodoWrite - handled separately)
@@ -1058,7 +1073,22 @@ export class SlackHandler {
         return;
       }
 
-      this.logger.info('Sending startup notifications', { count: channelConfigs.length });
+      // Get restart info for startup message
+      const restartInfo = this.restartManager.getLastRestartInfo();
+      let restartContext = '';
+
+      if (restartInfo) {
+        try {
+          const userName = await this.getUserDisplayName(restartInfo.userId);
+          const timestamp = new Date(restartInfo.timestamp);
+          const timeStr = timestamp.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+          restartContext = ` (Restarted by ${userName} at ${timeStr}: ${restartInfo.reason})`;
+        } catch (error) {
+          this.logger.warn('Failed to format restart context', error);
+        }
+      }
+
+      this.logger.info('Sending startup notifications', { count: channelConfigs.length, hasRestartInfo: !!restartInfo });
 
       for (const config of channelConfigs) {
         try {
@@ -1070,12 +1100,13 @@ export class SlackHandler {
 
           await this.app.client.chat.postMessage({
             channel: config.channelId,
-            text: `👋 I'm back online! Working directory for #${channelName}: \`${config.directory}\``,
+            text: `👋 I'm back online!${restartContext}\n\nWorking directory for #${channelName}: \`${config.directory}\``,
           });
 
           this.logger.info('Sent startup notification', {
             channel: channelName,
             directory: config.directory,
+            restartContext,
           });
         } catch (error) {
           this.logger.error('Failed to send startup notification to channel', {
