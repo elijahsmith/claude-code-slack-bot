@@ -289,6 +289,7 @@ export class SlackHandler {
       // Create permission handler for Slack-based approval
       const permissionHandler = this.createPermissionHandler(channel, thread_ts || ts, user, sessionKey);
 
+      let restarting = false;
       for await (const message of this.claudeHandler.streamQuery(finalPrompt, session, abortController, workingDirectory, permissionHandler)) {
         if (abortController.signal.aborted) break;
 
@@ -326,29 +327,14 @@ export class SlackHandler {
             );
 
             if (bashTool) {
-              // Try to extract reason from tool description or surrounding text content
-              let reason = 'Self-initiated restart';
-              const textContent = message.message.content
-                ?.filter((part: any) => part.type === 'text')
-                .map((part: any) => part.text)
-                .join(' ');
+              this.logger.info('Restart trigger detected, breaking out of stream loop', { sessionKey });
 
-              // Look for description or description text in the bash tool
-              if (bashTool.input?.description) {
-                reason = bashTool.input.description;
-              } else if (textContent && textContent.length > 0 && textContent.length < 200) {
-                // Use surrounding text as context if it's short enough
-                reason = textContent.trim();
-              }
-
-              this.restartManager.markRestart({
-                channel,
-                threadTs: thread_ts,
-                userId: event.user,
-                sessionKey,
-                timestamp: new Date().toISOString(),
-              }, reason);
-              this.logger.info('Marked session for restart notification', { sessionKey, reason });
+              // Post a brief status and break immediately — no further messages.
+              // The SIGTERM handler will snapshot all active sessions for resumption.
+              await this.messageManager.updateStatus(sessionKey, '🔄 *Restarting…*', channel, thread_ts || ts);
+              await this.updateMessageReaction(sessionKey, '🔄');
+              restarting = true;
+              break;
             }
 
             // Accumulate tool output (skip TodoWrite - handled separately)
@@ -399,15 +385,18 @@ export class SlackHandler {
         }
       }
 
-      // Update status to completed
-      await this.messageManager.updateStatus(sessionKey, '✅ *Task completed*', channel, thread_ts || ts);
+      if (!restarting) {
+        // Update status to completed
+        await this.messageManager.updateStatus(sessionKey, '✅ *Task completed*', channel, thread_ts || ts);
 
-      // Update reaction to show completion
-      await this.updateMessageReaction(sessionKey, '✅');
+        // Update reaction to show completion
+        await this.updateMessageReaction(sessionKey, '✅');
+      }
 
       this.logger.info('Completed processing message', {
         sessionKey,
         messageCount: currentMessages.length,
+        restarting,
       });
 
       // Clean up temporary files
@@ -911,6 +900,39 @@ export class SlackHandler {
     return formatted;
   }
 
+  /**
+   * Register a SIGTERM handler that snapshots all active sessions so they
+   * can be resumed after the process restarts.
+   */
+  registerShutdownHandler() {
+    process.on('SIGTERM', () => {
+      this.logger.info('SIGTERM received, snapshotting active sessions');
+
+      const sessions: import('./restart-manager.js').RestartSession[] = [];
+      for (const sessionKey of this.activeControllers.keys()) {
+        const session = this.claudeHandler.getSessionByKey(sessionKey);
+        const originalMsg = this.originalMessages.get(sessionKey);
+        if (session) {
+          sessions.push({
+            channel: session.channelId,
+            threadTs: session.threadTs,
+            messageTs: originalMsg?.ts,
+            userId: session.userId,
+            sessionKey,
+            timestamp: new Date().toISOString(),
+          });
+        }
+      }
+
+      if (sessions.length > 0) {
+        this.restartManager.markActiveSessions(sessions, 'SIGTERM shutdown');
+      }
+
+      this.logger.info('Shutdown snapshot complete', { sessionCount: sessions.length });
+      process.exit(0);
+    });
+  }
+
   setupEventHandlers() {
     // Handle direct messages
     this.app.message(async ({ message, say }: { message: any; say: any }) => {
@@ -1037,35 +1059,41 @@ export class SlackHandler {
   }
 
   async sendStartupNotifications() {
-    // Check for pending restart session first
-    const restartSession = this.restartManager.getPendingRestart();
-    if (restartSession) {
-      try {
-        // Create a synthetic message event to resume the conversation
-        const syntheticEvent: MessageEvent = {
-          user: restartSession.userId,
-          channel: restartSession.channel,
-          thread_ts: restartSession.threadTs,
-          ts: new Date().getTime().toString(),
-          text: 'continue', // Simple prompt to resume
-        };
+    // Resume all conversations that were active when the process was killed
+    const pendingSessions = this.restartManager.getPendingRestarts();
+    if (pendingSessions.length > 0) {
+      this.logger.info('Resuming conversations after restart', { count: pendingSessions.length });
 
-        // Create a say function that posts to the correct channel/thread
-        const say = async (message: any) => {
-          await this.app.client.chat.postMessage({
+      // Resume all sessions concurrently
+      const resumePromises = pendingSessions.map(async (restartSession) => {
+        try {
+          // Use the original messageTs so the session key matches (critical for DMs
+          // where thread_ts is undefined and the key falls back to ts).
+          const syntheticEvent: MessageEvent = {
+            user: restartSession.userId,
             channel: restartSession.channel,
             thread_ts: restartSession.threadTs,
-            text: message.text || message,
-            blocks: message.blocks,
-          });
-        };
+            ts: restartSession.messageTs || new Date().getTime().toString(),
+            text: 'The session was just restarted. Resume seamlessly from where you left off.',
+          };
 
-        // Resume the conversation by handling the message
-        this.logger.info('Resuming conversation after restart', { sessionKey: restartSession.sessionKey });
-        await this.handleMessage(syntheticEvent, say);
-      } catch (error) {
-        this.logger.error('Failed to resume conversation after restart', error);
-      }
+          const say = async (message: any) => {
+            await this.app.client.chat.postMessage({
+              channel: restartSession.channel,
+              thread_ts: restartSession.threadTs,
+              text: message.text || message,
+              blocks: message.blocks,
+            });
+          };
+
+          this.logger.info('Resuming conversation after restart', { sessionKey: restartSession.sessionKey });
+          await this.handleMessage(syntheticEvent, say);
+        } catch (error) {
+          this.logger.error('Failed to resume conversation after restart', { sessionKey: restartSession.sessionKey, error });
+        }
+      });
+
+      await Promise.all(resumePromises);
     }
 
     // Send regular startup notifications

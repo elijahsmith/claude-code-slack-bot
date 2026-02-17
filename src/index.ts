@@ -36,8 +36,9 @@ async function start() {
     const claudeHandler = new ClaudeHandler(mcpManager);
     const slackHandler = new SlackHandler(app, claudeHandler, mcpManager);
 
-    // Setup event handlers
+    // Setup event handlers and shutdown hook
     slackHandler.setupEventHandlers();
+    slackHandler.registerShutdownHandler();
 
     // Start the app
     await app.start();

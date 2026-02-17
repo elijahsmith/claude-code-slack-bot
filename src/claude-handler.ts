@@ -156,6 +156,10 @@ export class ClaudeHandler {
     return this.sessions.get(this.getSessionKey(userId, channelId, threadTs));
   }
 
+  getSessionByKey(sessionKey: string): ConversationSession | undefined {
+    return this.sessions.get(sessionKey);
+  }
+
   createSession(userId: string, channelId: string, threadTs?: string): ConversationSession {
     const session: ConversationSession = {
       userId,
