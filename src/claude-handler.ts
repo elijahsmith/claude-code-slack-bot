@@ -4,6 +4,9 @@ import { Logger } from './logger.js';
 import { McpManager, McpServerConfig } from './mcp-manager.js';
 import { config } from './config.js';
 import { storage } from './storage.js';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 
 // Permission handler type - returns allow/deny decision
 export type PermissionHandler = (
@@ -39,6 +42,110 @@ export class ClaudeHandler {
       count: stored.length,
       withSessionIds: stored.filter(s => s.session_id).length
     });
+
+    // Run startup diagnostics to verify SDK session data is actually present on disk
+    this.verifySessionIntegrity();
+  }
+
+  /**
+   * Verify that SDK session data exists on disk for all stored session IDs.
+   * Logs warnings for orphaned mappings and clears them so they don't cause
+   * resume failures at runtime.
+   */
+  private verifySessionIntegrity() {
+    const homeDir = os.homedir();
+    const claudeDir = path.join(homeDir, '.claude');
+    const projectsDir = path.join(claudeDir, 'projects');
+
+    // Log the SDK data directory state
+    const claudeDirExists = fs.existsSync(claudeDir);
+    const projectsDirExists = fs.existsSync(projectsDir);
+
+    this.logger.info('Session integrity check - SDK directory state', {
+      homeDir,
+      claudeDir,
+      claudeDirExists,
+      projectsDirExists,
+      claudeDirContents: claudeDirExists ? this.safeReaddir(claudeDir) : [],
+      projectsDirContents: projectsDirExists ? this.safeReaddir(projectsDir) : [],
+    });
+
+    // Check each session that claims to have a resumable sessionId
+    let verified = 0;
+    let orphaned = 0;
+
+    for (const [key, session] of this.sessions.entries()) {
+      if (!session.sessionId) continue;
+
+      // The SDK stores session data somewhere under ~/.claude - we can't know the
+      // exact path without SDK internals, but we can check if there's ANY project data
+      if (!projectsDirExists) {
+        this.logger.warn('Session has sessionId but no SDK projects directory exists - clearing', {
+          sessionKey: key,
+          sessionId: session.sessionId,
+        });
+        session.sessionId = undefined;
+        storage.saveSession(key, session.userId, session.channelId, session.threadTs, undefined);
+        orphaned++;
+        continue;
+      }
+
+      // Try to find the session file in any project subdirectory
+      const found = this.findSessionOnDisk(projectsDir, session.sessionId);
+      if (found) {
+        verified++;
+        this.logger.debug('Session verified on disk', {
+          sessionKey: key,
+          sessionId: session.sessionId,
+          path: found,
+        });
+      } else {
+        this.logger.warn('Session ID not found on disk - clearing to prevent resume failure', {
+          sessionKey: key,
+          sessionId: session.sessionId,
+        });
+        session.sessionId = undefined;
+        storage.saveSession(key, session.userId, session.channelId, session.threadTs, undefined);
+        orphaned++;
+      }
+    }
+
+    this.logger.info('Session integrity check complete', {
+      total: this.sessions.size,
+      withSessionIds: verified + orphaned,
+      verified,
+      orphaned,
+    });
+  }
+
+  private safeReaddir(dir: string): string[] {
+    try {
+      return fs.readdirSync(dir);
+    } catch {
+      return [];
+    }
+  }
+
+  private findSessionOnDisk(projectsDir: string, sessionId: string): string | null {
+    try {
+      // Walk project subdirectories looking for the session ID in filenames
+      const projects = fs.readdirSync(projectsDir);
+      for (const project of projects) {
+        const projectPath = path.join(projectsDir, project);
+        const stat = fs.statSync(projectPath);
+        if (!stat.isDirectory()) continue;
+
+        const files = this.safeReaddir(projectPath);
+        for (const file of files) {
+          if (file.includes(sessionId)) {
+            return path.join(projectPath, file);
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.error('Error scanning SDK projects directory', error);
+    }
+    return null;
   }
 
   getSessionKey(userId: string, channelId: string, threadTs?: string): string {
@@ -78,7 +185,7 @@ export class ClaudeHandler {
       permissionMode: permissionHandler ? 'default' : 'bypassPermissions',
       // Use Claude Code's system prompt preset to maintain the same behavior
       systemPrompt: { type: 'preset', preset: 'claude_code', append: config.systemPrompt },
-      settingSources: ["project"]
+      settingSources: ["project", "local"]
     };
 
     // Add custom system prompt if configured
