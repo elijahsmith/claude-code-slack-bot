@@ -319,15 +319,21 @@ export class SlackHandler {
               await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, thread_ts || ts, say);
             }
 
-            // Check for restart trigger (Bash: touch /control/restart.flag)
+            // Check for restart trigger (restart-bot command)
             const bashTool = message.message.content?.find((part: any) =>
               part.type === 'tool_use' &&
               part.name === 'Bash' &&
-              part.input?.command?.includes('touch /control/restart.flag')
+              (part.input?.command?.includes('restart-bot') || part.input?.command?.includes('touch /control/restart.flag'))
             );
 
             if (bashTool) {
               this.logger.info('Restart trigger detected, breaking out of stream loop', { sessionKey });
+
+              // Extract reason from restart-bot command and enrich with userId
+              const cmd = (bashTool as any).input?.command || '';
+              const reasonMatch = cmd.match(/restart-bot\s+["'](.+?)["']/);
+              const reason = reasonMatch ? reasonMatch[1] : 'Manual restart';
+              this.restartManager.requestRestart(user, reason);
 
               // Post a brief status and break immediately — no further messages.
               // The SIGTERM handler will snapshot all active sessions for resumption.
@@ -1096,13 +1102,11 @@ export class SlackHandler {
       await Promise.all(resumePromises);
     }
 
-    // Send regular startup notifications
+    // Send startup DM to admin
     try {
-      const configs = this.workingDirManager.listConfigurations();
-      const channelConfigs = configs.filter(config => !config.threadTs && !config.userId);
-
-      if (channelConfigs.length === 0) {
-        this.logger.info('No channels with configured working directories');
+      const adminUserId = config.adminSlackUserId;
+      if (!adminUserId) {
+        this.logger.info('No admin user configured, skipping startup DM');
         return;
       }
 
@@ -1112,44 +1116,36 @@ export class SlackHandler {
 
       if (restartInfo) {
         try {
-          const userName = await this.getUserDisplayName(restartInfo.userId);
+          const userName = restartInfo.userId
+            ? await this.getUserDisplayName(restartInfo.userId)
+            : 'unknown';
           const timestamp = new Date(restartInfo.timestamp);
           const timeStr = timestamp.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-          restartContext = ` (Restarted by ${userName} at ${timeStr}: ${restartInfo.reason})`;
+          restartContext = `\n\n_Restarted by ${userName} at ${timeStr}: ${restartInfo.reason}_`;
         } catch (error) {
           this.logger.warn('Failed to format restart context', error);
         }
       }
 
-      this.logger.info('Sending startup notifications', { count: channelConfigs.length, hasRestartInfo: !!restartInfo });
+      // Open DM with admin user
+      const dmResult = await this.app.client.conversations.open({
+        users: adminUserId,
+      });
 
-      for (const config of channelConfigs) {
-        try {
-          const channelInfo = await this.app.client.conversations.info({
-            channel: config.channelId,
-          });
-
-          const channelName = (channelInfo.channel as any)?.name || config.channelId;
-
-          await this.app.client.chat.postMessage({
-            channel: config.channelId,
-            text: `👋 I'm back online!${restartContext}\n\nWorking directory for #${channelName}: \`${config.directory}\``,
-          });
-
-          this.logger.info('Sent startup notification', {
-            channel: channelName,
-            directory: config.directory,
-            restartContext,
-          });
-        } catch (error) {
-          this.logger.error('Failed to send startup notification to channel', {
-            channelId: config.channelId,
-            error,
-          });
-        }
+      const dmChannel = dmResult.channel?.id;
+      if (!dmChannel) {
+        this.logger.error('Failed to open DM with admin user');
+        return;
       }
+
+      await this.app.client.chat.postMessage({
+        channel: dmChannel,
+        text: `👋 I'm back online!${restartContext}`,
+      });
+
+      this.logger.info('Sent startup DM to admin', { adminUserId, hasRestartInfo: !!restartInfo });
     } catch (error) {
-      this.logger.error('Failed to send startup notifications', error);
+      this.logger.error('Failed to send startup DM to admin', error);
     }
   }
 }

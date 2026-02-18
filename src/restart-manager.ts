@@ -3,6 +3,7 @@ import * as path from 'path';
 import { Logger } from './logger.js';
 
 const RESTART_MARKER_PATH = '/control/restart-session.json';
+const RESTART_REQUEST_PATH = '/control/restart-request.json';
 const RESTART_LOG_PATH = '/control/restart-log.txt';
 
 export interface RestartSession {
@@ -13,6 +14,12 @@ export interface RestartSession {
   sessionKey: string;
   timestamp: string;
   reason?: string;
+}
+
+export interface RestartRequest {
+  reason: string;
+  timestamp: string;
+  userId?: string;
 }
 
 export class RestartManager {
@@ -85,9 +92,63 @@ export class RestartManager {
   }
 
   /**
-   * Get the last restart log entry
+   * Enrich the restart-request.json with the Slack userId who triggered it.
+   * Called by slack-handler when it detects a restart-bot command.
+   */
+  requestRestart(userId: string, reason: string): void {
+    try {
+      const request: RestartRequest = {
+        reason,
+        timestamp: new Date().toISOString(),
+        userId,
+      };
+      fs.writeFileSync(RESTART_REQUEST_PATH, JSON.stringify(request, null, 2));
+      this.logger.info('Wrote restart request', { userId, reason });
+    } catch (error) {
+      this.logger.error('Failed to write restart request', error);
+    }
+  }
+
+  /**
+   * Read the structured restart request file (written by restart-bot script
+   * and enriched by requestRestart). Returns null if no file exists.
+   * Deletes the file after reading.
+   */
+  readRestartRequest(): RestartRequest | null {
+    try {
+      if (!fs.existsSync(RESTART_REQUEST_PATH)) {
+        return null;
+      }
+
+      const data = fs.readFileSync(RESTART_REQUEST_PATH, 'utf-8');
+      const request: RestartRequest = JSON.parse(data);
+
+      fs.unlinkSync(RESTART_REQUEST_PATH);
+
+      this.logger.info('Read restart request', request);
+      return request;
+    } catch (error) {
+      this.logger.error('Failed to read restart request', error);
+      return null;
+    }
+  }
+
+  /**
+   * Get the last restart info — prefers the structured request file,
+   * falls back to the log file.
    */
   getLastRestartInfo(): { timestamp: string; userId: string; reason: string } | null {
+    // Try the structured request file first
+    const request = this.readRestartRequest();
+    if (request) {
+      return {
+        timestamp: request.timestamp,
+        userId: request.userId || '',
+        reason: request.reason,
+      };
+    }
+
+    // Fall back to parsing the log file
     try {
       if (!fs.existsSync(RESTART_LOG_PATH)) {
         return null;
@@ -101,7 +162,6 @@ export class RestartManager {
       }
 
       const lastLine = lines[lines.length - 1];
-      // Format: 2026-02-17T14:45:32Z | sessions:N | Reason text
       const parts = lastLine.split(' | ');
 
       if (parts.length < 3) {
@@ -110,7 +170,7 @@ export class RestartManager {
 
       return {
         timestamp: parts[0],
-        userId: parts[1].replace('user:', '').replace('sessions:', ''),
+        userId: '',
         reason: parts[2],
       };
     } catch (error) {

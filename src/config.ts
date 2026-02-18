@@ -35,6 +35,8 @@ function parseAllowedTools(): string[] {
       'Bash:node *',
       // Beads task tracking
       'Bash:bd *',
+      // Restart
+      'Bash:restart-bot *',
       // File system operations (safe subset - no rm/mv)
       'Bash:ls *',
       'Bash:touch *',
@@ -74,6 +76,7 @@ export const config = {
     useBedrock: process.env.CLAUDE_CODE_USE_BEDROCK === '1',
     useVertex: process.env.CLAUDE_CODE_USE_VERTEX === '1',
   },
+  adminSlackUserId: process.env.ADMIN_SLACK_USER_ID || 'UJYJ96PFE',
   baseDirectory: process.env.BASE_DIRECTORY || '',
   systemPrompt: loadSystemPrompt(),
   debug: process.env.DEBUG === 'true' || process.env.NODE_ENV === 'development',
